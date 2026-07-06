@@ -157,6 +157,20 @@ curl -X POST "http://localhost:5001/api/opportunities/scan" \
 
 ---
 
+## ⚡ Performance & AI Architecture
+
+FinClaw is built for speed and efficiency, utilizing a **Hybrid AI Pipeline** and **Aggressive Multithreading** to maximize the hardware utilization of modern machines (like Apple Silicon Mac Minis).
+
+### 1. Hardware Utilization (Multithreading)
+Instead of processing financial data sequentially, FinClaw uses Python's `ThreadPoolExecutor` (configured with up to 40 concurrent workers) to blast through I/O-bound tasks. It concurrently fetches live quotes, options chains, and technical indicators for your entire watchlist simultaneously, reducing scan times from minutes to seconds.
+
+### 2. Hybrid AI (XGBoost + LLM)
+To save on expensive LLM token costs and reduce latency, FinClaw uses a **two-stage filtering pipeline**:
+1. **Local ML Model (Pre-filter):** An internal XGBoost classifier (`finclaw_xgb.json`) instantly evaluates hundreds of technical indicators (RSI, MACD, Volume Spikes) locally on your machine, assigning a probability score to every setup.
+2. **Generative LLM (Analysis):** Only the highest-conviction opportunities (the "cream of the crop") are packaged and sent to the LLM (Gemini/Claude). The LLM is then used exclusively for what it does best: qualitative reasoning, analyzing fundamental context, interpreting market sentiment, and writing the final human-readable brief.
+
+---
+
 ## ⚠️ Disclaimer
 
 FinClaw is an AI-powered analysis tool for **educational and informational purposes only**. It is **NOT** a licensed financial advisor. All outputs, signals, and recommendations should be verified independently. **Never make investment decisions based solely on AI output.** Always consult a licensed financial advisor before making investment decisions.
