@@ -10,3 +10,5 @@ data/*.db
 node_modules/
 .venv/
 venv/
+data/portfolio.json
+data/ml_dataset.csv
