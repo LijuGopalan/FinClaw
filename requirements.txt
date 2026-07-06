@@ -1,0 +1,40 @@
+# FinClaw Financial Assistant — Python Dependencies
+# ================================================
+# Install all dependencies with:
+#   pip install -r requirements.txt
+
+# Core financial data libraries
+yfinance>=0.2.36          # Yahoo Finance unofficial wrapper (free, prototyping)
+pandas>=2.0.0             # Data manipulation
+numpy>=1.24.0             # Numerical computations
+
+# API communication
+requests>=2.31.0          # HTTP requests to financial APIs
+
+# Environment management
+python-dotenv>=1.0.0      # Load .env file
+PyYAML>=6.0               # Read OpenClaw YAML configuration
+
+# Technical analysis (optional — auto-calculated in skills, but useful standalone)
+ta>=0.11.0                # Technical Analysis library (RSI, MACD, BB, etc.)
+
+# Scheduling (for daily market scans)
+schedule>=1.2.0           # Simple Python scheduler for cron-like tasks
+APScheduler>=3.10.0       # Advanced scheduler with timezone support
+
+# Notifications (optional)
+python-telegram-bot>=20.0 # Telegram bot notifications
+sendgrid>=6.10.0          # Email alerts via SendGrid (alternative to SMTP)
+
+# Data storage
+sqlite-utils>=3.35        # Lightweight local database for storing scan results
+
+# Web server (for dashboard API endpoints)
+flask>=3.0.0              # Lightweight web server to serve dashboard
+flask-cors>=4.0.0         # CORS headers for dashboard API
+
+# MCP (Model Context Protocol) — for OpenClaw integration
+mcp>=1.0.0                # Model Context Protocol SDK
+
+# Google Gemini AI SDK — for LLM-powered briefings and chat
+google-genai>=1.0.0       # Gemini Flash wrapper used by skills/llm.py

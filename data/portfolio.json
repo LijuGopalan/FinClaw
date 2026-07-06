@@ -1,0 +1,68 @@
+{
+  "last_updated": "2026-06-29",
+  "currency": "USD",
+  "risk_profile": "moderate",
+  "total_invested": 0,
+  "cash": 212.04,
+  "holdings": [
+    {
+      "ticker": "ARM",
+      "shares": 497,
+      "avg_cost": 431.90,
+      "date_added": "2026-06-29",
+      "horizon": "long-term",
+      "sector": "Technology",
+      "notes": "401k BrokerageLink"
+    },
+    {
+      "ticker": "MRVL",
+      "shares": 200,
+      "avg_cost": 297.97,
+      "date_added": "2026-06-29",
+      "horizon": "long-term",
+      "sector": "AI Infrastructure",
+      "notes": "401k BrokerageLink"
+    },
+    {
+      "ticker": "MU",
+      "shares": 242,
+      "avg_cost": 1240.08,
+      "date_added": "2026-06-29",
+      "horizon": "long-term",
+      "sector": "Technology",
+      "notes": "401k BrokerageLink"
+    },
+    {
+      "ticker": "WDC",
+      "shares": 200,
+      "avg_cost": 733.76,
+      "date_added": "2026-06-29",
+      "horizon": "long-term",
+      "sector": "Technology",
+      "notes": "401k BrokerageLink"
+    },
+    {
+      "ticker": "NVDA",
+      "shares": 1100,
+      "avg_cost": 194.0,
+      "date_added": "2026-06-29",
+      "horizon": "long-term",
+      "sector": "Technology",
+      "notes": "Schwab/Etrade cash portfolio"
+    },
+    {
+      "ticker": "PLTR",
+      "shares": 1000,
+      "avg_cost": 116.60,
+      "date_added": "2026-06-29",
+      "horizon": "long-term",
+      "sector": "Technology",
+      "notes": "Schwab/Etrade cash portfolio"
+    }
+  ],
+  "watchlist": [],
+  "sector_targets": {
+    "AI Infrastructure": 50,
+    "Technology": 50
+  }
+}

@@ -1,0 +1,163 @@
+agent_name: FinClaw
+agent_version: 1.0.0
+soul_file: ./SOUL.md
+description: AI-powered financial assistant for daily market tracking, options analysis,
+  and portfolio advisory.
+models:
+  primary:
+    provider: google
+    model_id: gemini-3.1-pro-preview
+    api_key_env: GOOGLE_API_KEY
+    max_tokens: 8192
+    temperature: 0.1
+    purpose: complex_analysis
+  secondary:
+    provider: google
+    model_id: gemini-3-flash-preview
+    api_key_env: GOOGLE_API_KEY
+    max_tokens: 2048
+    temperature: 0.1
+  intraday:
+    provider: google
+    model_id: gemini-3-flash-preview
+    api_key_env: GOOGLE_API_KEY
+    max_tokens: 2048
+    temperature: 0.1
+    purpose: intraday_scan
+data_sources:
+  tradier:
+    enabled: false
+    api_key_env: TRADIER_API_KEY
+    base_url: https://api.tradier.com/v1
+    sandbox_url: https://sandbox.tradier.com/v1
+    use_sandbox: false
+  alpha_vantage:
+    enabled: true
+    api_key_env: ALPHA_VANTAGE_API_KEY
+    base_url: https://www.alphavantage.co/query
+  polygon:
+    enabled: false
+    api_key_env: POLYGON_API_KEY
+    base_url: https://api.polygon.io
+  yfinance:
+    enabled: true
+    warning: "Unofficial API \u2014 may break without notice. Do not use for live\
+      \ trading."
+  news:
+    provider: newsapi
+    api_key_env: NEWS_API_KEY
+    base_url: https://newsapi.org/v2
+server:
+  port: 5050
+  host: 0.0.0.0
+  dashboard_url: http://localhost:5050
+database:
+  enabled: true
+  file: ./data/finclaw.db
+portfolio:
+  file: ./data/portfolio.json
+  currency: USD
+  risk_profile: moderate
+  max_position_size_pct: 8
+  sector_concentration_alert_pct: 15
+  default_stop_loss_pct: -5
+monitoring:
+  timezone: America/New_York
+  schedule:
+    premarket_scan: 08:15
+    intraday_scan: '*/15 8-16 * * 1-5'
+    midday_scan: 12:00
+    postmarket_scan: 16:05
+  opportunities:
+    default_universe_limit: 24
+    scheduled_universe_limit: 40
+    default_limit: 12
+    alert_min_score: 65
+    include_options: true
+    sessions:
+      premarket:
+        horizon: swing
+        focus: Gaps, overnight catalysts, earnings, analyst actions, and high relative
+          volume.
+      regular:
+        horizon: scalp
+        focus: Intraday VWAP, relative volume, ATR, opening-range behavior, and options
+          flow.
+      postmarket:
+        horizon: swing
+        focus: Closing strength, after-hours catalysts, earnings reactions, and next-day
+          watchlist.
+      closed:
+        horizon: long
+        focus: Long-term setups, fundamentals, sector rotation, insider activity,
+          and macro risk.
+  options_alerts:
+    unusual_volume_multiplier: 2.0
+    min_open_interest: 500
+    min_premium: 10000
+  watchlists:
+    Technology:
+    - OPEN
+    - AAPL
+    - GOOG
+    - META
+    - MSFT
+    - ORCL
+    - AMZN
+    - VRT
+    - PLTR
+    - QCOM
+    - ARM
+    - SOUN
+    - ANET
+    - DELL
+    - NVDA
+    - CRWV
+    - TSM
+    - AVGO
+    - TSLA
+    - AMD
+    - SNDK
+    - MSTR
+    - SMCI
+    - CLSK
+    - ASML
+    - COHR
+    - IREN
+    - MU
+    - INTC
+    AI Infrastructure:
+    - NBIS
+    - FN
+    - AXTI
+    - LITE
+    - CRDO
+    - MRVL
+    - AAOI
+notifications:
+  telegram:
+    enabled: true
+    bot_token_env: TELEGRAM_BOT_TOKEN
+    chat_id_env: TELEGRAM_CHAT_ID
+  email:
+    enabled: false
+    smtp_host: smtp.gmail.com
+    smtp_port: 587
+    from_env: EMAIL_FROM
+    to_env: EMAIL_TO
+    password_env: EMAIL_PASSWORD
+  slack:
+    enabled: false
+    webhook_url_env: SLACK_WEBHOOK_URL
+logging:
+  level: INFO
+  file: ./logs/finclaw.log
+  max_size_mb: 50
+  rotate_count: 5
+
+execution:
+  enabled: true
+  environment: "paper"
+  max_position_size_pct: 0.05
+  max_daily_loss_pct: 0.02
+  instrument_type: "shares"
