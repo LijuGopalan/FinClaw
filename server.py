@@ -162,8 +162,18 @@ def api_quotes():
     tickers = request.args.get("tickers", "").split(",")
     tickers = [t.strip() for t in tickers if t.strip()]
     results = {}
-    for t in tickers[:20]:  # Limit to 20 tickers
-        results[t.upper()] = get_stock_quote(t)
+
+    from concurrent.futures import ThreadPoolExecutor
+
+    with ThreadPoolExecutor(max_workers=min(20, len(tickers) if tickers else 1)) as executor:
+        futures = {executor.submit(get_stock_quote, t): t.upper() for t in tickers[:20]}
+        for future in futures:
+            t_upper = futures[future]
+            try:
+                results[t_upper] = future.result()
+            except Exception as e:
+                pass  # or log error
+
     return jsonify(results)
 
 
