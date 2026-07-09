@@ -25,6 +25,7 @@ try:
         get_sector_rotation,
         get_stock_quote,
         get_technical_analysis,
+        get_price_history,
     )
 except ImportError:
     from .financial_skills import (
@@ -36,6 +37,7 @@ except ImportError:
         get_sector_rotation,
         get_stock_quote,
         get_technical_analysis,
+        get_price_history,
     )
 
 try:
@@ -60,25 +62,120 @@ BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 CONFIG_PATH = os.path.join(BASE_DIR, "openclaw.config.yml")
 ET = ZoneInfo("America/New_York")
 
-# ── ML Model Integration ──
-_ML_MODEL = None
+# ── ML Model Integration (MLX-first, XGBoost fallback) ──────────────────────
+_ML_MODEL  = None
 _ML_LOADED = False
 
+class _MLXModelAdapter:
+    """
+    Wraps a trained MLX FinClawMLP so it exposes the same
+    predict_proba(features_df) interface previously used by XGBoost.
+
+    This lets the scoring block (lines ~570–597) remain completely unchanged:
+        prob = float(model.predict_proba(features)[0][1])
+    """
+
+    def __init__(self, mlx_model, norm_mean, norm_std):
+        self._model    = mlx_model
+        self._mean     = norm_mean   # np.ndarray shape (5,)
+        self._std      = norm_std    # np.ndarray shape (5,)
+
+    def predict_proba(self, features_df):
+        """
+        Parameters
+        ----------
+        features_df : pd.DataFrame with columns
+                      [rsi, macd_hist, atr_pct, rvol, vwap_dist]
+
+        Returns
+        -------
+        np.ndarray shape (n_samples, 2) — columns: [P(0), P(1)]
+        Matches the XGBoost predict_proba contract.
+        """
+        import numpy as np
+        import mlx.core as mx
+
+        x_raw = features_df.values.astype(np.float32)          # (N, 5)
+        x_norm = (x_raw - self._mean) / self._std              # z-score
+        x_mx   = mx.array(x_norm, dtype=mx.float32)
+
+        logits = self._model(x_mx).squeeze(-1)                 # (N,)
+        mx.eval(logits)
+
+        probs_pos = 1.0 / (1.0 + np.exp(-np.array(logits)))   # sigmoid (N,)
+        probs_neg = 1.0 - probs_pos
+
+        return np.stack([probs_neg, probs_pos], axis=1)        # (N, 2)
+
+
 def get_ml_model():
+    """
+    Load the best available FinClaw ML model.
+
+    Priority:
+      1. MLX MLP  (models/finclaw_mlx.npz)   — GPU/Neural Engine on Apple Silicon
+      2. XGBoost  (models/finclaw_xgb.json)  — CPU fallback if MLX model absent
+
+    Both return an object with a predict_proba(features_df) method so the
+    rest of the scoring code is completely unaffected.
+    """
     global _ML_MODEL, _ML_LOADED
     if _ML_LOADED:
         return _ML_MODEL
     _ML_LOADED = True
-    try:
-        import xgboost as xgb
-        model_path = os.path.join(BASE_DIR, "models", "finclaw_xgb.json")
-        if os.path.exists(model_path):
-            _ML_MODEL = xgb.XGBClassifier()
-            _ML_MODEL.load_model(model_path)
-            print("🧠 Loaded FinClaw XGBoost model.")
-    except Exception as e:
-        print(f"Warning: Failed to load XGBoost model: {e}")
+
+    # ── 1. Try MLX model (GPU / Neural Engine) ────────────────────────────────
+    mlx_weights = os.path.join(BASE_DIR, "models", "finclaw_mlx.npz")
+    mlx_config  = os.path.join(BASE_DIR, "models", "finclaw_mlx_config.json")
+    if os.path.exists(mlx_weights) and os.path.exists(mlx_config):
+        try:
+            import json
+            import numpy as np
+            import mlx.core as mx
+            import mlx.nn as nn
+            import sys
+
+            # Dynamically import FinClawMLP from the training script
+            ml_pipeline_dir = os.path.join(BASE_DIR, "ml_pipeline")
+            if ml_pipeline_dir not in sys.path:
+                sys.path.insert(0, ml_pipeline_dir)
+            from train_model_mlx import FinClawMLP
+
+            with open(mlx_config) as f:
+                cfg = json.load(f)
+
+            mlx_model = FinClawMLP(
+                input_dim   = cfg["input_dim"],
+                hidden_dims = cfg["hidden_dims"],
+                dropout_p   = cfg["dropout_p"],
+            )
+            mlx_model.load_weights(mlx_weights)
+            mlx_model.eval()  # disable dropout for inference
+
+            norm_mean = np.array(cfg["norm_mean"], dtype=np.float32)
+            norm_std  = np.array(cfg["norm_std"],  dtype=np.float32)
+
+            _ML_MODEL = _MLXModelAdapter(mlx_model, norm_mean, norm_std)
+            print("🧠 Loaded FinClaw MLX model (GPU/Neural Engine).")
+            return _ML_MODEL
+        except Exception as e:
+            print(f"Warning: Failed to load MLX model ({e}), trying XGBoost fallback...")
+
+    # ── 2. Fallback: XGBoost CPU model ────────────────────────────────────────
+    xgb_path = os.path.join(BASE_DIR, "models", "finclaw_xgb.json")
+    if os.path.exists(xgb_path):
+        try:
+            import xgboost as xgb
+            clf = xgb.XGBClassifier()
+            clf.load_model(xgb_path)
+            _ML_MODEL = clf
+            print("🧠 Loaded FinClaw XGBoost model (CPU fallback).")
+        except Exception as e:
+            print(f"Warning: Failed to load XGBoost fallback model: {e}")
+
     return _ML_MODEL
+
+
 
 
 HORIZON_LABELS = {
@@ -158,6 +255,18 @@ def load_opportunity_watchlist(limit=1000):
             tickers.extend(items or [])
     except Exception:
         pass
+
+    # Inject active portfolio holdings so they are always monitored
+    try:
+        import json
+        portfolio_path = os.path.join(BASE_DIR, "data", "portfolio.json")
+        if os.path.exists(portfolio_path):
+            with open(portfolio_path, "r") as f:
+                port_data = json.load(f)
+                for holding in port_data.get("holdings", []):
+                    tickers.append(holding.get("ticker"))
+    except Exception as e:
+        print(f"Error loading portfolio.json into universe: {e}")
 
     if not tickers:
         tickers = ["SPY", "QQQ", "NVDA", "AAPL", "MSFT", "TSLA", "AMZN", "META", "GOOGL"]
@@ -249,7 +358,7 @@ def get_intraday_snapshot(ticker, interval="5m", period="5d"):
     """
     ticker = ticker.upper().strip()
     try:
-        hist = yf.Ticker(ticker).history(period=period, interval=interval, prepost=True)
+        hist = get_price_history(ticker, period=period, interval=interval)
         if hist is None or hist.empty:
             return {"ticker": ticker, "error": "No intraday data available"}
 
@@ -553,6 +662,7 @@ def score_ticker_opportunity(ticker, session="auto", horizon="auto", include_opt
             risk_flags.append("Below intraday VWAP")
             
     # ── ML Predictive Score (Hybrid) ──
+    ml_prob = None
     try:
         model = get_ml_model()
         if model and price and atr:
@@ -571,6 +681,7 @@ def score_ticker_opportunity(ticker, session="auto", horizon="auto", include_opt
             
             # Predict probability of 1% upward move in 1 hour
             prob = float(model.predict_proba(features)[0][1])
+            ml_prob = prob
             
             if prob > 0.65:
                 bonus = int(prob * 40)
@@ -770,6 +881,37 @@ def score_ticker_opportunity(ticker, session="auto", horizon="auto", include_opt
         action = "ACTIVE WATCH"
     elif score < 35:
         action = "LOW PRIORITY"
+
+    # PORTFOLIO DEFENSE ENGINE
+    try:
+        import json
+        portfolio_path = os.path.join(BASE_DIR, "data", "portfolio.json")
+        if os.path.exists(portfolio_path):
+            with open(portfolio_path, "r") as f:
+                port_data = json.load(f)
+            for h in port_data.get("holdings", []):
+                if h.get("ticker") == ticker:
+                    avg_cost = h.get("avg_cost", 0)
+                    if avg_cost > 0 and price:
+                        profit_pct = (price - avg_cost) / avg_cost
+                        
+                        # Use ML probability to validate exit signals to avoid noise
+                        is_ml_sell = ml_prob is not None and ml_prob < 0.35
+                        
+                        if rsi and rsi > 75 and profit_pct > 0.15 and is_ml_sell:
+                            action = "PROFIT-TAKE"
+                            score = 100
+                            reasons.insert(0, f"Portfolio up {profit_pct*100:.1f}%; ML confirms reversal (prob {ml_prob:.1%})")
+                        elif macd_hist and macd_hist < 0 and profit_pct < -0.05 and is_ml_sell:
+                            action = "SELL/TRIM"
+                            score = 100
+                            risk_flags.insert(0, f"Portfolio down {profit_pct*100:.1f}%; ML confirms breakdown (prob {ml_prob:.1%})")
+                        elif support and price < support and profit_pct < 0 and is_ml_sell:
+                            action = "SELL/TRIM"
+                            score = 100
+                            risk_flags.insert(0, f"Support broken at ${support:.2f}; ML confirms breakdown (prob {ml_prob:.1%})")
+    except Exception as e:
+        pass
 
     levels = _price_levels(price, atr, horizon)
     if vcp_buy_point:

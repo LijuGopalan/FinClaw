@@ -1,16 +1,19 @@
-import yfinance as yf
 import pandas as pd
 import numpy as np
 import scipy.stats as si
 import datetime
 
+try:
+    from financial_skills import get_price_history, get_options_chain
+except ImportError:
+    from .financial_skills import get_price_history, get_options_chain
+
 def detect_episodic_pivot(ticker):
     """Detects a Gap & Go (Episodic Pivot) - Gap up > 10% on 3x volume."""
     try:
-        stock = yf.Ticker(ticker)
-        df = stock.history(period="1mo")
-        if len(df) < 2:
-            return None
+        df = get_price_history(ticker, period="1mo", interval="1d")
+        if df is None or len(df) < 2:
+            return {"detected": False}
             
         recent = df.iloc[-1]
         prev = df.iloc[-2]
@@ -33,10 +36,9 @@ def detect_episodic_pivot(ticker):
 def detect_mean_reversion(ticker):
     """Detects Rubber Band setup - stretched >15% below 10 EMA, RSI < 25."""
     try:
-        stock = yf.Ticker(ticker)
-        df = stock.history(period="3mo")
-        if len(df) < 20:
-            return None
+        df = get_price_history(ticker, period="3mo", interval="1d")
+        if df is None or len(df) < 20:
+            return {"detected": False}
             
         df['EMA10'] = df['Close'].ewm(span=10, adjust=False).mean()
         
@@ -73,18 +75,20 @@ def _bs_gamma(S, K, T, r, sigma):
 def calculate_gamma_walls(ticker):
     """Estimates Gamma Walls using Open Interest and BS Gamma to find Support/Resistance."""
     try:
-        stock = yf.Ticker(ticker)
-        current_price = stock.history(period="1d")['Close'].iloc[-1]
+        df = get_price_history(ticker, period="5d", interval="1d")
+        if df is None or df.empty:
+            return None
+        current_price = df['Close'].iloc[-1]
         
-        dates = stock.options
-        if not dates:
+        chain = get_options_chain(ticker)
+        if chain is None or chain.get("error"):
             return None
             
-        # Just use the nearest expiration for local gamma wall
-        nearest_expiry = dates[0]
-        chain = stock.option_chain(nearest_expiry)
-        calls = chain.calls
-        puts = chain.puts
+        nearest_expiry = chain.get("expiry")
+        if not nearest_expiry: return None
+        
+        calls = pd.DataFrame(chain.get("all_calls", []))
+        puts = pd.DataFrame(chain.get("all_puts", []))
         
         # Approximate time to expiry in years
         days_to_expiry = max(1, (datetime.datetime.strptime(nearest_expiry, "%Y-%m-%d") - datetime.datetime.now()).days)
@@ -93,12 +97,15 @@ def calculate_gamma_walls(ticker):
         # Simplified risk-free rate and vol (can be tuned)
         r = 0.05
         
-        # Calculate Gamma * OI for calls and puts
-        calls['Gamma'] = calls.apply(lambda row: _bs_gamma(current_price, row['strike'], T, r, row.get('impliedVolatility', 0.5)), axis=1)
-        calls['GEX'] = calls['Gamma'] * calls['openInterest'] * 100 # *100 shares per contract
+        def _get_iv(row): return row.get('iv', row.get('impliedVolatility', 0.5)) or 0.5
+        def _get_oi(row): return row.get('open_interest', row.get('openInterest', 0)) or 0
         
-        puts['Gamma'] = puts.apply(lambda row: _bs_gamma(current_price, row['strike'], T, r, row.get('impliedVolatility', 0.5)), axis=1)
-        puts['GEX'] = puts['Gamma'] * puts['openInterest'] * 100
+        # Calculate Gamma * OI for calls and puts
+        calls['Gamma'] = calls.apply(lambda row: _bs_gamma(current_price, row['strike'], T, r, _get_iv(row)), axis=1)
+        calls['GEX'] = calls['Gamma'] * calls.apply(_get_oi, axis=1) * 100 # *100 shares per contract
+        
+        puts['Gamma'] = puts.apply(lambda row: _bs_gamma(current_price, row['strike'], T, r, _get_iv(row)), axis=1)
+        puts['GEX'] = puts['Gamma'] * puts.apply(_get_oi, axis=1) * 100
         
         if calls.empty or puts.empty:
             return None
@@ -120,9 +127,8 @@ def calculate_gamma_walls(ticker):
 def detect_block_trades(ticker):
     """Proxy for Dark Pool: Detects massive 5-min volume anomalies >5x std dev."""
     try:
-        stock = yf.Ticker(ticker)
-        df = stock.history(period="5d", interval="5m")
-        if len(df) < 50:
+        df = get_price_history(ticker, period="5d", interval="5m")
+        if df is None or len(df) < 50:
             return {"detected": False}
             
         vol_mean = df['Volume'].mean()
@@ -139,3 +145,4 @@ def detect_block_trades(ticker):
         return {"detected": False}
     except Exception:
         return {"detected": False}
+

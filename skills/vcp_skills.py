@@ -1,6 +1,10 @@
-import yfinance as yf
 import pandas as pd
 import numpy as np
+
+try:
+    from financial_skills import get_price_history
+except ImportError:
+    from .financial_skills import get_price_history
 
 def detect_vcp_setup(ticker):
     """
@@ -9,9 +13,8 @@ def detect_vcp_setup(ticker):
     Step 2: Checks for Volatility Contraction and Volume Dry-up on the right side of the base.
     """
     try:
-        stock = yf.Ticker(ticker)
-        df = stock.history(period="1y")
-        if df.empty or len(df) < 200:
+        df = get_price_history(ticker, period="1y", interval="1d")
+        if df is None or df.empty or len(df) < 200:
             return {"vcp_detected": False, "reason": "Not enough data"}
 
         # Calculate moving averages

@@ -21,9 +21,11 @@ load_dotenv()
 logger = logging.getLogger("finclaw.llm")
 
 _API_KEY = os.getenv("GOOGLE_API_KEY")
-_MODEL_NAME = "gemini-2.5-flash"
+_MODEL_NAME = "gemini-3.1-pro-preview"
 _MAX_RETRIES = 3
-_RETRY_BASE = 2  # seconds
+_RETRY_BASE  = 2   # seconds
+_REQUEST_TIMEOUT = 150  # seconds — raised from 90s; Gemini Pro on long prompts
+                        # can take 100-120s. Must be < agents.defaults.timeoutSeconds (300s)
 
 client = None
 if _API_KEY:
@@ -76,7 +78,10 @@ def ask(prompt: str, system: str = None, max_tokens: int = 2048) -> str:
                     system_instruction=sys_prompt,
                     max_output_tokens=max_tokens,
                     temperature=0.15,
-                )
+                    # Hard HTTP timeout — prevents indefinite hang on slow/idle model
+                    # Moved inside GenerateContentConfig for google-genai >= 1.0
+                    http_options=types.HttpOptions(timeout=_REQUEST_TIMEOUT * 1000),
+                ),
             )
             return response.text
         except Exception as e:

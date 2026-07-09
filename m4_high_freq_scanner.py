@@ -22,9 +22,13 @@ S_AND_P_500 = [
 
 def fetch_data(ticker):
     try:
-        import yfinance as yf
-        hist = yf.Ticker(ticker).history(period="5d", interval="5m")
-        if hist.empty: return None
+        import sys
+        import os
+        # Ensure skills directory is importable
+        sys.path.insert(0, os.path.join(os.path.dirname(__file__), "skills"))
+        from financial_skills import get_price_history
+        hist = get_price_history(ticker, period="5d", interval="5m")
+        if hist is None or hist.empty: return None
         
         hist = hist.dropna()
         latest = hist.iloc[-1]
@@ -80,6 +84,21 @@ def run_high_frequency_scan():
         df = df.sort_values(by="score", ascending=False).head(15)
         print("🔝 Top 15 Setups from Scan:")
         print(df.to_string(index=False))
+        
+        try:
+            import sys
+            import os
+            sys.path.insert(0, os.path.join(os.path.dirname(__file__), "skills"))
+            from notifications import send_telegram
+            
+            top_5 = df.head(5)
+            msg = "⚡ <b>M4 High-Freq Scan Results</b>\n\n"
+            for _, row in top_5.iterrows():
+                msg += f"• <b>${row['ticker']}</b>: ${row['price']} | Move: {row['move_pct']}% | RVol: {row['rvol']}x\n"
+            send_telegram(msg, parse_mode="HTML")
+            print("Telegram alert sent successfully.")
+        except Exception as e:
+            print(f"Failed to send telegram alert: {e}")
         
 if __name__ == "__main__":
     run_high_frequency_scan()

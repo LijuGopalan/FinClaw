@@ -12,3 +12,4 @@ node_modules/
 venv/
 data/portfolio.json
 data/ml_dataset.csv
+data/schwab_token.json

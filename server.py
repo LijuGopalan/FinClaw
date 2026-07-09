@@ -6,7 +6,7 @@ for the interactive dashboard. Run with:
 
     python server.py
 
-Then open http://localhost:5001 for the dashboard.
+Then open http://localhost:5055 for the dashboard.
 """
 
 import os
@@ -586,6 +586,23 @@ def api_opportunities_scan():
                     )
                     logger.info("Telegram alert sent for %s", scan_type)
                     
+                    # PORTFOLIO DEFENSE ALERTS
+                    for opp in result.get('opportunities', []):
+                        action = opp.get("action", "")
+                        if action in ["PROFIT-TAKE", "SELL/TRIM"]:
+                            reason_str = "; ".join(opp.get("reasons", []) + opp.get("risk_flags", []))
+                            notify(
+                                title=f"🚨 PORTFOLIO ALERT: {action} {opp.get('ticker')}",
+                                message=f"Price: ${opp.get('price')}\nReason: {reason_str}",
+                                channels=params["channels"],
+                            )
+                            save_alert(
+                                alert_type="warning",
+                                title=f"{action} {opp.get('ticker')}",
+                                message=f"Price: ${opp.get('price')}\nReason: {reason_str}",
+                                ticker=opp.get("ticker"),
+                            )
+
                     # NEW: Advanced Manual Trading Alerts for High Conviction ML Signals
                     try:
                         from skills.execution_engine import execute_trade_from_signal
@@ -716,13 +733,87 @@ def api_config_watchlist():
 
 @app.route("/api/health")
 def api_health():
-    """Health check endpoint."""
+    """Health check endpoint — includes data source status."""
+    try:
+        from schwab_client import schwab_available
+        schwab_on = schwab_available()
+    except ImportError:
+        schwab_on = False
+
     return jsonify({
-        "status": "healthy",
-        "agent": "FinClaw",
-        "version": "2.1.0",
-        "timestamp": datetime.utcnow().isoformat()
+        "status":   "healthy",
+        "agent":    "FinClaw",
+        "version":  "2.2.0",
+        "data_sources": {
+            "schwab":  {"active": schwab_on,        "label": "Charles Schwab (production)"},
+            "tradier": {"active": bool(os.getenv("TRADIER_API_KEY")), "label": "Tradier"},
+            "yfinance":{"active": True,              "label": "yfinance (fallback)"},
+        },
+        "timestamp": datetime.utcnow().isoformat(),
     })
+
+
+# ============================================================
+# SCHWAB API STATUS & AUTH ENDPOINTS
+# ============================================================
+@app.route("/api/schwab/status")
+def api_schwab_status():
+    """Return the current Schwab API authentication status."""
+    try:
+        from schwab_client import (
+            schwab_available, SCHWAB_API_KEY,
+            SCHWAB_CALLBACK_URL, _TOKEN_PATH,
+        )
+        import os as _os
+        token_exists = _os.path.exists(_TOKEN_PATH)
+        active       = schwab_available()
+        return jsonify({
+            "authenticated":   active,
+            "token_file":      _TOKEN_PATH,
+            "token_exists":    token_exists,
+            "api_key_set":     bool(SCHWAB_API_KEY),
+            "callback_url":    SCHWAB_CALLBACK_URL,
+            "instructions":    (
+                "Run `python skills/schwab_client.py` from the project root "
+                "to complete OAuth2 authentication, then restart the server."
+                if not active else "Schwab API is authenticated and active."
+            ),
+        })
+    except ImportError:
+        return jsonify({
+            "authenticated": False,
+            "error": "schwab-py not installed. Run: pip install schwab-py",
+        })
+
+
+@app.route("/api/schwab/reauth", methods=["POST"])
+def api_schwab_reauth():
+    """
+    Trigger a Schwab token refresh (non-interactive).
+    For first-time auth, run `python skills/schwab_client.py` from terminal.
+    """
+    try:
+        from schwab_client import schwab_available, _TOKEN_PATH, _init_attempted
+        import schwab_client as _sc
+        # Reset state so next call re-tries
+        _sc._init_attempted = False
+        _sc._schwab_available = False
+        _sc._client = None
+        _sc._ensure_client(interactive=False)
+        if schwab_available():
+            return jsonify({"status": "success", "message": "Schwab token reloaded."})
+        else:
+            return jsonify({
+                "status": "needs_auth",
+                "message": (
+                    "No valid token found. "
+                    "Run `python skills/schwab_client.py` from the project root "
+                    "to complete first-time OAuth2 login."
+                ),
+                "token_path": _TOKEN_PATH,
+            }), 202
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
 
 
 # ============================================================
@@ -825,7 +916,7 @@ def api_backtest():
         return jsonify({"error": str(e)}), 500
 
 if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 5050))
+    port = int(os.environ.get("PORT", 5055))
     debug = os.environ.get("FLASK_DEBUG", "false").lower() == "true"
 
     logger.info("")

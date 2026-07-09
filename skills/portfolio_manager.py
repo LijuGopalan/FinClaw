@@ -1,5 +1,9 @@
-import yfinance as yf
 import pandas as pd
+
+try:
+    from financial_skills import get_price_history
+except ImportError:
+    from .financial_skills import get_price_history
 
 def calculate_trailing_stop(ticker, entry_price=None, atr_multiplier=3):
     """
@@ -8,10 +12,8 @@ def calculate_trailing_stop(ticker, entry_price=None, atr_multiplier=3):
     Otherwise, it just uses the highest high of the last 20 days.
     """
     try:
-        stock = yf.Ticker(ticker)
-        # Fetch last 3 months to get ATR and Highest High
-        df = stock.history(period="3mo")
-        if len(df) < 20:
+        df = get_price_history(ticker, period="3mo", interval="1d")
+        if df is None or len(df) < 20:
             return None
             
         # Calculate ATR (14 day)

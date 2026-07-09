@@ -13,18 +13,15 @@ FinClaw does not just track prices; it actively hunts for complex algorithmic se
 - **Dark Pool Proxy Detection:** Scans 5-minute intraday charts for massive volume anomalies (>5x standard deviation) to reverse-engineer institutional off-exchange block trades.
 
 ## 🛡️ 2. Dynamic Portfolio Management
-FinClaw actively protects your wealth rather than just providing buy signals:
-- **Live P&L Tracking:** Syncs with your portfolio to track real-time cost basis and performance.
-- **Dynamic Trailing Stops (Chandelier Exit):** Employs Average True Range (ATR) mathematics to dynamically raise your stop-loss as your stocks climb in profit, locking in gains automatically.
-- **Interactive Rebalancer:** Analyzes your current sector weighting and suggests exact allocation changes (e.g., "Reduce NVDA by 5%, Increase PLTR by 5%") to mathematically lower your portfolio's Beta and Risk Score.
+FinClaw actively monitors your wealth and suggests risk management actions:
+- **Live P&L Tracking:** Syncs with your Charles Schwab portfolio to track real-time cost basis and performance.
+- **LLM Rebalancing Suggestions:** The daily Post-Market summary actively analyzes your sector weighting and mathematically suggests rebalancing if any single position exceeds 8% of the portfolio.
 
 ## 📊 3. The Dashboard (UI/UX)
-The FinClaw Web Dashboard (`http://localhost:5001`) operates as a modern Bloomberg Terminal replacement, featuring multiple interactive modules:
-- **Live Alerts Feed:** A scrolling, color-coded feed of all active signals (🟢 BUY, 🔴 SELL, 🟣 REBALANCE).
-- **The Fear Matrix (Sentiment Heatmap):** A live visual grid that scrapes the latest news for your watchlists and runs AI sentiment analysis, glowing bright green for bullish momentum or deep red for bearish news.
-- **Options PnL Payoff Visualizer:** Dynamically graphs your theoretical Profit & Loss and exact break-even point for any options trade before you execute it.
-- **Backtesting Sandbox:** A simulation engine allowing you to test FinClaw's logic against historical data to find the theoretical Win Rate, ROI, and Max Drawdown of any strategy.
-- **AI Accountability Report Card:** The system mathematically grades its own past alerts (Target vs. Stop Hit Ratio), providing full transparency into the AI's actual Win Rate.
+The FinClaw Web Dashboard (`http://localhost:5001`) operates as a modern, color-coded trading terminal:
+- **Live Alerts Feed:** A scrolling, color-coded feed of all active signals from the opportunity engine.
+- **Portfolio Overview:** Real-time synchronization of your portfolio holdings, P&L, and cash balances.
+- **Active Scans View:** Displays the highest-conviction algorithmically generated setups for scalping, swing trading, and volume anomalies.
 
 ## 🔍 4. Fundamental & Macro Analysis
 FinClaw pulls and interprets vast amounts of market data:

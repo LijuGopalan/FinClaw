@@ -18,6 +18,7 @@ import time
 import threading
 import requests
 import logging
+import pytz
 from datetime import datetime
 
 # ── Logging ────────────────────────────────────────────────────────────────
@@ -31,7 +32,7 @@ console.setLevel(logging.INFO)
 logging.getLogger("").addHandler(console)
 
 # ── Constants ───────────────────────────────────────────────────────────────
-API_BASE = "http://localhost:5050/api"
+API_BASE = "http://localhost:5055/api"
 
 # Add skills/ to path so we can import llm.py
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "skills"))
@@ -91,6 +92,31 @@ def trigger_scan(session_type, horizon, notify=True):
     except Exception as e:
         logging.error("Failed to trigger scan %s_%s: %s", session_type, horizon, e)
 
+def trigger_delivery_volume_scan():
+    """Run the delivery volume confluence scan over portfolio holdings."""
+    def _run():
+        try:
+            from skills.delivery_volume import scan_and_alert_portfolio
+            
+            logging.info("Starting Delivery Volume Confluence Scan...")
+            
+            # Use requests to hit our local API instead of importing skills directly 
+            # to avoid circular import issues in scheduler daemon
+            portfolio = _api_get("/portfolio", timeout=30)
+            holdings = portfolio.get("holdings", [])
+            tickers = [h["ticker"] for h in holdings if "ticker" in h]
+            
+            if not tickers:
+                logging.warning("No tickers found in portfolio for delivery volume scan")
+                return
+                
+            scan_and_alert_portfolio(tickers)
+        except Exception as e:
+            logging.error("Failed to run delivery volume scan: %s", e)
+            
+    thread = threading.Thread(target=_run, daemon=True)
+    thread.start()
+
 
 # ── LLM briefing engine ──────────────────────────────────────────────────────
 def trigger_llm_brief(brief_type: str):
@@ -105,11 +131,13 @@ def trigger_llm_brief(brief_type: str):
         logging.info("Starting LLM brief: %s", brief_type)
 
         # Fetch live context data
-        portfolio = _api_get("/portfolio", timeout=60)
-        movers    = _api_get("/market/movers", timeout=30)
-        fg        = _api_get("/market/fear-greed", timeout=15)
-        alerts    = _api_get("/alerts?limit=5", timeout=15)
-        opps      = _api_get("/opportunities?limit=8&session=auto", timeout=30)
+        # Timeouts are generous because these calls hit live APIs (yfinance / Tradier)
+        # and the opportunities scan can take 40-60s on a full watchlist.
+        portfolio = _api_get("/portfolio",                           timeout=90)
+        movers    = _api_get("/market/movers",                       timeout=45)
+        fg        = _api_get("/market/fear-greed",                   timeout=20)
+        alerts    = _api_get("/alerts?limit=5",                      timeout=20)
+        opps      = _api_get("/opportunities?limit=8&session=auto",  timeout=90)
 
         api_data = {
             "portfolio":      portfolio,
@@ -155,7 +183,7 @@ def trigger_llm_brief(brief_type: str):
 
         prompt = f"{context}\n\n---\nYOUR TASK:\n{task}"
 
-        response = ask(prompt, max_tokens=8000)
+        response = ask(prompt, max_tokens=8192)
 
         # Format and send
         header = {
@@ -180,13 +208,17 @@ def trigger_llm_brief(brief_type: str):
 def run_scheduler():
     logging.info("Starting FinClaw Scheduler Daemon (Algorithmic + LLM)...")
 
-    last_intraday     = None
-    last_premarket_day = None
-    last_midday_day    = None
-    last_close_day     = None
+    last_intraday        = None
+    last_premarket_day   = None
+    last_midday_day      = None
+    last_close_day       = None
+    last_delivery_10_day = None
+    last_delivery_14_day = None
 
     while True:
-        now = datetime.now()
+        # Enforce CST timezone for all scheduling logic
+        cst_tz = pytz.timezone('America/Chicago')
+        now = datetime.now(cst_tz)
 
         # Only run on weekdays (Mon=0 … Fri=4)
         if now.weekday() <= 4:
@@ -206,10 +238,20 @@ def run_scheduler():
                             trigger_scan("regular", "scalp")
                             last_intraday = minute_key
 
+            # ── 10:00 CST — Delivery Volume Confluence Check ────────────────
+            if now.hour == 10 and now.minute == 0 and last_delivery_10_day != today_str:
+                trigger_delivery_volume_scan()
+                last_delivery_10_day = today_str
+
             # ── 12:00 CST — Midday LLM swing analysis ─────────────────────
             if now.hour == 12 and now.minute == 0 and last_midday_day != today_str:
                 trigger_llm_brief("midday")
                 last_midday_day = today_str
+                
+            # ── 14:00 CST — Delivery Volume Confluence Check ────────────────
+            if now.hour == 14 and now.minute == 0 and last_delivery_14_day != today_str:
+                trigger_delivery_volume_scan()
+                last_delivery_14_day = today_str
 
             # ── 16:05 CST — Close summary LLM brief ───────────────────────
             if now.hour == 16 and now.minute == 5 and last_close_day != today_str:

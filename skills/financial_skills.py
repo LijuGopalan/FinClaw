@@ -5,8 +5,20 @@ These Python functions act as "skills" (tools) that the OpenClaw agent
 calls when it needs real financial data. Each skill connects to an
 approved data source and returns structured data.
 
+Data source priority
+--------------------
+    1. Charles Schwab Market Data API  (production-grade, real-time)
+       → schwab_client.py handles OAuth2 + token management
+    2. Tradier API  (real-time, requires funded brokerage account)
+    3. yfinance  (unofficial Yahoo Finance scraper — last resort)
+
 Requirements:
-    pip install yfinance requests python-dotenv pandas ta
+    pip install schwab-py yfinance requests python-dotenv pandas ta
+
+First-time Schwab auth
+----------------------
+    python skills/schwab_client.py
+    # Follow the browser prompt, then restart the server.
 
 Usage: The agent calls these via MCP (Model Context Protocol) or
        directly via OpenClaw's skills system.
@@ -25,6 +37,30 @@ from dotenv import load_dotenv
 from functools import wraps
 
 load_dotenv()
+
+# Charles Schwab client (primary data source — lazy-initialised)
+try:
+    from schwab_client import (
+        schwab_available,
+        get_quote          as _schwab_quote,
+        get_quotes_batch   as _schwab_quotes_batch,
+        get_price_history  as _schwab_price_history,
+        get_intraday_history as _schwab_intraday_history,
+        get_option_chain   as _schwab_option_chain,
+        get_movers         as _schwab_movers,
+        get_market_hours   as _schwab_market_hours,
+    )
+    logger_temp = logging.getLogger("finclaw.skills")
+    logger_temp.info("schwab_client imported — will activate once token is present")
+except ImportError:
+    schwab_available    = lambda: False  # noqa: E731
+    _schwab_quote       = lambda *a, **k: None  # noqa: E731
+    _schwab_quotes_batch= lambda *a, **k: {}  # noqa: E731
+    _schwab_price_history = lambda *a, **k: None  # noqa: E731
+    _schwab_intraday_history = lambda *a, **k: None  # noqa: E731
+    _schwab_option_chain= lambda *a, **k: None  # noqa: E731
+    _schwab_movers      = lambda *a, **k: None  # noqa: E731
+    _schwab_market_hours= lambda *a, **k: None  # noqa: E731
 
 # ============================================================
 # LOGGING
@@ -118,11 +154,23 @@ def get_cache_stats():
 def get_stock_quote(ticker: str) -> dict:
     """
     Returns real-time price data for a ticker symbol.
-    Uses Tradier if available, falls back to yfinance.
+
+    Priority:
+      1. Charles Schwab (production API — OAuth2 token required)
+      2. Tradier        (real-time, funded account required)
+      3. yfinance       (unofficial scraper — last resort)
     """
     ticker = ticker.upper().strip()
 
-    # Try Tradier first (real-time, requires funded account)
+    # ── 1. Charles Schwab (production) ───────────────────────────────────────
+    if schwab_available():
+        result = _schwab_quote(ticker)
+        if result and result.get("price") is not None:
+            logger.debug("[Schwab] quote %s = $%.2f", ticker, result["price"])
+            return result
+        logger.debug("Schwab quote returned nothing for %s — trying Tradier", ticker)
+
+    # ── 2. Tradier (real-time, requires funded account) ───────────────────────
     if TRADIER_KEY:
         headers = {
             "Authorization": f"Bearer {TRADIER_KEY}",
@@ -158,7 +206,7 @@ def get_stock_quote(ticker: str) -> dict:
         except Exception as e:
             logger.warning("Tradier failed for %s: %s", ticker, e)
 
-    # Fallback: yfinance
+    # ── 3. yfinance (unofficial — last resort) ────────────────────────────────
     try:
         stock = yf.Ticker(ticker)
         info  = stock.info
@@ -190,6 +238,64 @@ def get_stock_quote(ticker: str) -> dict:
 
 
 # ============================================================
+# SKILL: Get Price History
+# ============================================================
+@cached(ttl_seconds=300)
+def get_price_history(ticker: str, period: str = "1y", interval: str = "1d") -> pd.DataFrame:
+    """
+    Returns price history DataFrame.
+    """
+    ticker = ticker.upper().strip()
+    
+    if interval == "1d":
+        days = 365
+        if period == "1mo": days = 30
+        elif period == "3mo": days = 90
+        elif period == "6mo": days = 180
+        elif period == "5d": days = 5
+        
+        if schwab_available():
+            candles = _schwab_price_history(ticker, days=days)
+            if candles:
+                df = pd.DataFrame(candles)
+                if not df.empty:
+                    df["Date"] = pd.to_datetime(df["time"])
+                    df = df.set_index("Date")
+                    df.rename(columns={
+                        "open": "Open", "high": "High", "low": "Low",
+                        "close": "Close", "volume": "Volume"
+                    }, inplace=True)
+                    return df
+    else:
+        # Intraday
+        days = 5
+        if period == "1d": days = 1
+        elif period == "1mo": days = 30
+        
+        if schwab_available():
+            candles = _schwab_intraday_history(ticker, days=days, interval=interval)
+            if candles:
+                df = pd.DataFrame(candles)
+                if not df.empty:
+                    df["Date"] = pd.to_datetime(df["time"])
+                    df = df.set_index("Date")
+                    df.rename(columns={
+                        "open": "Open", "high": "High", "low": "Low",
+                        "close": "Close", "volume": "Volume"
+                    }, inplace=True)
+                    return df
+
+    # Fallback to yfinance
+    try:
+        stock = yf.Ticker(ticker)
+        df = stock.history(period=period, interval=interval, prepost=True)
+        return df
+    except Exception as e:
+        logger.warning("yfinance history failed for %s: %s", ticker, e)
+        return pd.DataFrame()
+
+
+# ============================================================
 # SKILL: Get Options Chain
 # ============================================================
 @cached(ttl_seconds=60)
@@ -197,11 +303,22 @@ def get_options_chain(ticker: str, expiry: str = None) -> dict:
     """
     Returns options chain for a given ticker.
     expiry format: "YYYY-MM-DD" or None for nearest expiry.
-    Uses Tradier if available (real options data), else yfinance.
+
+    Priority:
+      1. Charles Schwab (production — full greeks, real-time)
+      2. Tradier        (real options data, funded account required)
+      3. yfinance       (unofficial — last resort)
     """
     ticker = ticker.upper().strip()
 
-    # Tradier path (requires funded account — real data)
+    # ── 1. Charles Schwab ─────────────────────────────────────────────────────
+    if schwab_available():
+        result = _schwab_option_chain(ticker, expiry)
+        if result:
+            logger.debug("[Schwab] options chain for %s (%s)", ticker, result.get("expiry"))
+            return result
+
+    # ── 2. Tradier (requires funded account — real data) ──────────────────────
     if TRADIER_KEY:
         headers = {
             "Authorization": f"Bearer {TRADIER_KEY}",
@@ -258,13 +375,15 @@ def get_options_chain(ticker: str, expiry: str = None) -> dict:
                     "put_call_ratio": round(sum(p.get("volume", 0) for p in puts) /
                                            max(sum(c.get("volume", 0) for c in calls), 1), 2),
                     "unusual_activity": unusual,
+                    "all_calls": calls,
+                    "all_puts": puts,
                     "source": "Tradier",
                     "timestamp": datetime.utcnow().isoformat()
                 }
         except Exception as e:
             logger.warning("Tradier options failed for %s: %s", ticker, e)
 
-    # Fallback: yfinance
+    # ── 3. yfinance (unofficial — last resort) ────────────────────────────────
     try:
         stock = yf.Ticker(ticker)
         expirations = stock.options
@@ -294,6 +413,8 @@ def get_options_chain(ticker: str, expiry: str = None) -> dict:
             "put_call_ratio": round(total_put_vol / max(total_call_vol, 1), 2),
             "top_call_strikes": top_calls,
             "top_put_strikes":  top_puts,
+            "all_calls": calls.to_dict("records"),
+            "all_puts": puts.to_dict("records"),
             "source": "yfinance (unofficial)",
             "timestamp": datetime.utcnow().isoformat()
         }
@@ -307,21 +428,38 @@ def get_options_chain(ticker: str, expiry: str = None) -> dict:
 @cached(ttl_seconds=60)
 def get_market_movers() -> dict:
     """
-    Returns today's top market movers using yfinance.
-    For a production setup, use Tradier or Polygon.io.
+    Returns today's top market movers and sector performance.
+
+    Priority:
+      1. Charles Schwab get_movers() for gainer/loser/active lists
+      2. Quotes-based fallback using sector ETFs (yfinance)
     """
-    # Major ETF snapshots as market pulse
+    # ── 1. Schwab market movers ───────────────────────────────────────────────
+    schwab_movers = None
+    if schwab_available():
+        schwab_movers = _schwab_movers("$SPX")
+
+    # ── Market index snapshots (batch via Schwab if available) ────────────────
     market_tickers = ["SPY", "QQQ", "IWM", "DIA", "VIX"]
     results = {}
 
-    for t in market_tickers:
-        q = get_stock_quote(t)
-        results[t] = {
-            "price":      q.get("price"),
-            "change_pct": q.get("change_pct")
-        }
+    if schwab_available():
+        batch = _schwab_quotes_batch(market_tickers)
+        for t in market_tickers:
+            q = batch.get(t) or get_stock_quote(t)
+            results[t] = {
+                "price":      q.get("price"),
+                "change_pct": q.get("change_pct")
+            }
+    else:
+        for t in market_tickers:
+            q = get_stock_quote(t)
+            results[t] = {
+                "price":      q.get("price"),
+                "change_pct": q.get("change_pct")
+            }
 
-    # Sector ETFs for sentiment
+    # ── Sector ETFs ───────────────────────────────────────────────────────────
     sector_etfs = {
         "XLK": "Technology",
         "XLF": "Financials",
@@ -337,13 +475,23 @@ def get_market_movers() -> dict:
     }
 
     sector_data = {}
-    for etf, name in sector_etfs.items():
-        q = get_stock_quote(etf)
-        sector_data[name] = {
-            "etf": etf,
-            "price":      q.get("price"),
-            "change_pct": q.get("change_pct")
-        }
+    if schwab_available():
+        batch_sector = _schwab_quotes_batch(list(sector_etfs.keys()))
+        for etf, name in sector_etfs.items():
+            q = batch_sector.get(etf) or get_stock_quote(etf)
+            sector_data[name] = {
+                "etf": etf,
+                "price":      q.get("price"),
+                "change_pct": q.get("change_pct")
+            }
+    else:
+        for etf, name in sector_etfs.items():
+            q = get_stock_quote(etf)
+            sector_data[name] = {
+                "etf": etf,
+                "price":      q.get("price"),
+                "change_pct": q.get("change_pct")
+            }
 
     # Sort sectors by performance
     sorted_sectors = sorted(
@@ -352,14 +500,24 @@ def get_market_movers() -> dict:
         reverse=True
     )
 
-    return {
-        "market_indices": results,
+    data_source = "Charles Schwab (production)" if schwab_available() else "yfinance (unofficial)"
+
+    result = {
+        "market_indices":     results,
         "sector_performance": dict(sorted_sectors),
-        "top_sector":    sorted_sectors[0][0]  if sorted_sectors else None,
-        "worst_sector":  sorted_sectors[-1][0] if sorted_sectors else None,
-        "source": "yfinance (unofficial)",
-        "timestamp": datetime.utcnow().isoformat()
+        "top_sector":         sorted_sectors[0][0]  if sorted_sectors else None,
+        "worst_sector":       sorted_sectors[-1][0] if sorted_sectors else None,
+        "source":             data_source,
+        "timestamp":          datetime.utcnow().isoformat()
     }
+
+    # Merge Schwab movers data if available
+    if schwab_movers:
+        result["gainers"] = schwab_movers.get("gainers", [])
+        result["losers"]  = schwab_movers.get("losers",  [])
+        result["actives"] = schwab_movers.get("actives", [])
+
+    return result
 
 
 # ============================================================
@@ -369,13 +527,17 @@ def get_market_movers() -> dict:
 def get_technical_analysis(ticker: str) -> dict:
     """
     Returns RSI, MACD, Bollinger Bands, and moving averages.
+
+    Price history source priority:
+      1. Charles Schwab (production — OHLCV, 365 days)
+      2. yfinance       (unofficial fallback)
     """
     ticker = ticker.upper().strip()
     try:
-        stock = yf.Ticker(ticker)
-        hist  = stock.history(period="1y", interval="1d")
+        # ── 1. Try Schwab price history ───────────────────────────────────────
+        hist = get_price_history(ticker, period="1y", interval="1d")
 
-        if hist.empty:
+        if hist is None or hist.empty:
             return {"error": "No historical data", "ticker": ticker}
 
         close = hist["Close"]

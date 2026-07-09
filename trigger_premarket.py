@@ -17,7 +17,7 @@ logging.basicConfig(
     format="%(asctime)s [%(levelname)s] premarket: %(message)s",
 )
 
-API_BASE = "http://127.0.0.1:5050/api"
+API_BASE = "http://127.0.0.1:5055/api"
 
 def _api_get(path, timeout=30):
     try:

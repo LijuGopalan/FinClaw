@@ -4,7 +4,8 @@
 #   pip install -r requirements.txt
 
 # Core financial data libraries
-yfinance>=0.2.36          # Yahoo Finance unofficial wrapper (free, prototyping)
+schwab-py>=1.4.0          # Charles Schwab Market Data API (OAuth2, production)
+yfinance>=0.2.36          # Yahoo Finance unofficial wrapper (fallback only)
 pandas>=2.0.0             # Data manipulation
 numpy>=1.24.0             # Numerical computations
 
@@ -38,3 +39,8 @@ mcp>=1.0.0                # Model Context Protocol SDK
 
 # Google Gemini AI SDK — for LLM-powered briefings and chat
 google-genai>=1.0.0       # Gemini Flash wrapper used by skills/llm.py
+
+# Apple MLX — GPU/Neural Engine acceleration (Apple Silicon ONLY)
+# Install: pip install mlx
+# Docs:    https://ml-explore.github.io/mlx/
+mlx>=0.21.0               # Neural network training on M-series chips (GPU + ANE)

@@ -42,7 +42,7 @@ from telegram.ext import (
 
 BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
-API_BASE = "http://localhost:5050/api"
+API_BASE = "http://localhost:5055/api"
 
 
 def _api(path, method="GET", json=None, timeout=30):
@@ -87,10 +87,36 @@ async def cmd_help(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         "/portfolio — Your portfolio P&amp;L summary\n"
         "/alerts — Last 5 market alerts\n"
         "/status — Server &amp; scheduler health\n"
+        "/delivery — Run delivery volume confluence scan now\n"
+        "/insiders <ticker> — Show recent insider trading\n"
+        "/feargreed — Show Fear & Greed Index\n"
+        "/movers — Show today's market movers\n"
+        "/sectors — Show sector rotation performance\n"
+        "/news <ticker> — Show latest news for a ticker\n"
+        "/restart — Hard restart all FinClaw background daemons\n"
         "/help — This message",
         parse_mode="HTML",
     )
 
+
+# ============================================================
+# /restart
+# ============================================================
+async def cmd_restart(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(
+        "🔄 <b>Initiating full stack restart...</b>\n"
+        "I will be offline for a few seconds while I kill and restart all background processes.",
+        parse_mode="HTML",
+    )
+    import subprocess
+    cmd = """
+    sleep 2
+    pkill -9 -f "python.*server.py" || true
+    pkill -9 -f "python.*scheduler.py" || true
+    pkill -9 -f "python.*telegram_bot.py" || true
+    ./start.sh
+    """
+    subprocess.Popen(cmd, shell=True, cwd="/Users/adgroup/.gemini/antigravity/scratch/openclaw-financial-assistant", start_new_session=True)
 
 # ============================================================
 # /status
@@ -198,9 +224,156 @@ async def cmd_scan(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             "I'll send you an alert as soon as I find a high-conviction opportunity!"
         )
 
+# ============================================================
+# /delivery
+# ============================================================
+async def cmd_delivery(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(
+        "📊 Starting Delivery Volume Confluence scan across your portfolio...\n"
+        "You'll receive alerts here if any strong institutional accumulation/distribution patterns are found."
+    )
+    def _run():
+        import logging
+        try:
+            from skills.delivery_volume import scan_and_alert_portfolio
+            portfolio = _api("/portfolio")
+            if isinstance(portfolio, dict):
+                holdings = portfolio.get("holdings", [])
+                tickers = [h["ticker"] for h in holdings if "ticker" in h]
+            else:
+                tickers = []
+                
+            if not tickers:
+                logging.warning("No tickers found in portfolio for delivery volume scan")
+                return
+            scan_and_alert_portfolio(tickers)
+        except Exception as e:
+            logging.error(f"Failed to run delivery volume scan: {e}")
+            
+    import threading
+    threading.Thread(target=_run, daemon=True).start()
 
 # ============================================================
-# LLM-Powered Chat Handler (Gemini Flash)
+# /insiders
+# ============================================================
+async def cmd_insiders(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    if not ctx.args:
+        await update.message.reply_text("⚠️ Please provide a ticker: `/insiders AAPL`", parse_mode="Markdown")
+        return
+    ticker = ctx.args[0].upper()
+    await update.message.reply_text(f"⏳ Fetching insider activity for {ticker}...")
+    data = _api(f"/insider/{ticker}", timeout=15)
+    if data.get("error"):
+        await update.message.reply_text(f"❌ Error: {data['error']}")
+        return
+    
+    insiders = data.get("insider_trades", [])
+    if not insiders:
+        await update.message.reply_text(f"📭 No recent insider trades found for {ticker}.")
+        return
+
+    lines = [f"👔 <b>{ticker} Insider Activity</b>\n"]
+    for trade in insiders[:5]:
+        tx_type = trade.get("transaction_type", "")
+        shares = trade.get("shares", 0)
+        price = trade.get("price", 0)
+        name = trade.get("insider_name", "Unknown")
+        em = "🟢" if "Buy" in tx_type else "🔴" if "Sell" in tx_type else "⚪"
+        lines.append(f"{em} <b>{tx_type}</b> by {name}")
+        lines.append(f"   {shares:,.0f} shares @ ${price:.2f}")
+    
+    await update.message.reply_text("\n".join(lines), parse_mode="HTML")
+
+# ============================================================
+# /feargreed
+# ============================================================
+async def cmd_feargreed(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("⏳ Fetching Fear & Greed index...")
+    data = _api("/market/fear-greed", timeout=10)
+    if data.get("error"):
+        await update.message.reply_text(f"❌ Error: {data['error']}")
+        return
+    
+    score = data.get("score", "N/A")
+    rating = data.get("rating", "Unknown")
+    await update.message.reply_text(f"🧭 <b>Fear & Greed Index</b>\n\nScore: {score}/100\nStatus: <b>{rating}</b>", parse_mode="HTML")
+
+# ============================================================
+# /movers
+# ============================================================
+async def cmd_movers(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("⏳ Fetching market movers...")
+    data = _api("/market/movers", timeout=15)
+    if data.get("error"):
+        await update.message.reply_text(f"❌ Error: {data['error']}")
+        return
+    
+    lines = ["🚀 <b>Top Market Movers</b>\n"]
+    gainers = data.get("gainers", [])
+    if gainers:
+        lines.append("<b>🟢 Gainers:</b>")
+        for g in gainers[:3]:
+            lines.append(f"• {g.get('ticker')}: {g.get('change_pct', 0):+.2f}%")
+        lines.append("")
+        
+    losers = data.get("losers", [])
+    if losers:
+        lines.append("<b>🔴 Losers:</b>")
+        for l in losers[:3]:
+            lines.append(f"• {l.get('ticker')}: {l.get('change_pct', 0):+.2f}%")
+            
+    await update.message.reply_text("\n".join(lines), parse_mode="HTML")
+
+# ============================================================
+# /sectors
+# ============================================================
+async def cmd_sectors(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("⏳ Fetching sector performance...")
+    data = _api("/market/sectors", timeout=15)
+    if data.get("error"):
+        await update.message.reply_text(f"❌ Error: {data['error']}")
+        return
+        
+    sectors = data.get("sectors", {})
+    if not sectors:
+        await update.message.reply_text("📭 No sector data available.")
+        return
+        
+    lines = ["🏢 <b>Sector Rotation</b>\n"]
+    for sec, perf in sorted(sectors.items(), key=lambda x: x[1], reverse=True):
+        em = "🟢" if perf >= 0 else "🔴"
+        lines.append(f"{em} {sec}: {perf:+.2f}%")
+        
+    await update.message.reply_text("\n".join(lines), parse_mode="HTML")
+
+# ============================================================
+# /news
+# ============================================================
+async def cmd_news(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    if not ctx.args:
+        await update.message.reply_text("⚠️ Please provide a ticker: `/news AAPL`", parse_mode="Markdown")
+        return
+    ticker = ctx.args[0].upper()
+    await update.message.reply_text(f"⏳ Fetching latest news for {ticker}...")
+    data = _api(f"/news/{ticker}", timeout=15)
+    if data.get("error"):
+        await update.message.reply_text(f"❌ Error: {data['error']}")
+        return
+        
+    news = data.get("articles", [])
+    if not news:
+        await update.message.reply_text(f"📭 No recent news found for {ticker}.")
+        return
+        
+    lines = [f"📰 <b>{ticker} Latest News</b>\n"]
+    for article in news[:3]:
+        lines.append(f"• <a href='{article.get('url', '')}'>{article.get('title', 'No Title')}</a>")
+        lines.append(f"  <i>{article.get('publisher', 'Unknown')}</i>\n")
+        
+    await update.message.reply_text("\n".join(lines), parse_mode="HTML", disable_web_page_preview=True)
+
+# ============================================================
+# LLM Free-Text Chat
 # ============================================================
 import sys as _sys
 _sys.path.insert(0, os.path.join(os.path.dirname(__file__), "skills"))
@@ -315,6 +488,13 @@ def main():
     app.add_handler(CommandHandler("portfolio", cmd_portfolio))
     app.add_handler(CommandHandler("alerts", cmd_alerts))
     app.add_handler(CommandHandler("scan", cmd_scan))
+    app.add_handler(CommandHandler("delivery", cmd_delivery))
+    app.add_handler(CommandHandler("insiders", cmd_insiders))
+    app.add_handler(CommandHandler("feargreed", cmd_feargreed))
+    app.add_handler(CommandHandler("movers", cmd_movers))
+    app.add_handler(CommandHandler("sectors", cmd_sectors))
+    app.add_handler(CommandHandler("news", cmd_news))
+    app.add_handler(CommandHandler("restart", cmd_restart))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
 
     # Polling mode — no public server needed

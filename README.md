@@ -65,7 +65,7 @@ Edit `data/portfolio.json` with your actual stock holdings, cost basis, and inve
 python server.py
 
 # Then open the dashboard in your browser:
-# http://localhost:5001
+# http://localhost:5055
 ```
 
 ### Step 6 — Launch the Agent
@@ -104,6 +104,8 @@ For financial analysis, use a **tiered model strategy**:
 | Complex analysis, portfolio advice, options interpretation | **Claude Sonnet 4.5** (Primary) | Best nuance, long context, avoids hallucination |
 | Quick quotes, alerts, news summaries | **Claude Haiku 3.5** (Secondary) | Fast, cheap ($0.80/MTok) |
 | Complex quantitative math (optional) | **GPT-5.4** (Alt) | Strongest multi-step reasoning |
+
+
 
 ### Model Settings for Finance
 ```yaml
@@ -144,13 +146,13 @@ max_tokens: 8192    # Enough for full portfolio analysis
 ### Opportunity Scanner API
 ```bash
 # Ranked watchlist scan for the current market session
-curl "http://localhost:5001/api/opportunities?session=auto&horizon=auto"
+curl "http://localhost:5055/api/opportunities?session=auto&horizon=auto"
 
 # Intraday scalp scan
-curl "http://localhost:5001/api/opportunities?session=regular&horizon=scalp&min_score=45"
+curl "http://localhost:5055/api/opportunities?session=regular&horizon=scalp&min_score=45"
 
 # Save a scheduled-style scan and optionally send an alert
-curl -X POST "http://localhost:5001/api/opportunities/scan" \
+curl -X POST "http://localhost:5055/api/opportunities/scan" \
   -H "Content-Type: application/json" \
   -d '{"session":"premarket","horizon":"swing","notify":false}'
 ```
