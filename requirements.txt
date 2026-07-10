@@ -4,7 +4,7 @@
 #   pip install -r requirements.txt
 
 # Core financial data libraries
-schwab-py>=1.4.0          # Charles Schwab Market Data API (OAuth2, production)
+ib_async>=0.9.86          # Interactive Brokers API Integration
 yfinance>=0.2.36          # Yahoo Finance unofficial wrapper (fallback only)
 pandas>=2.0.0             # Data manipulation
 numpy>=1.24.0             # Numerical computations

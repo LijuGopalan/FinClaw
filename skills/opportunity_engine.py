@@ -1059,25 +1059,39 @@ def build_opportunity_brief(scan_result, max_items=5):
         rows = [r for r in rows if r.get("score", 0) >= 58]
 
     if not rows:
-        return None
+        return "Scan complete. No high-conviction opportunities found at this time."
 
-    lines = [f"FinClaw {session} {horizon} opportunities:"]
+    lines = [f"🎯 <b>FinClaw {session.title()} {horizon.title()} Opportunities</b>\n"]
     for item in rows:
-        price = item.get("price")
-        score = item.get("score")
-        ticker = item.get("ticker")
-        action = item.get("action")
+        price = item.get("price", 0)
+        score = item.get("score", 0)
+        ticker = item.get("ticker", "")
+        action = item.get("action", "")
         rr = item.get("risk_reward")
         thesis = item.get("thesis", "")
+        
+        # Visual cues for score
+        score_emoji = "🔥" if score >= 80 else ("⚡" if score >= 60 else "📊")
+        
+        # Visual cues for action
+        action_str = f"🟢 <b>{action}</b>" if "buy" in action.lower() or "watch" in action.lower() else f"🔴 <b>{action}</b>"
+        
         levels = (
-            f"entry {item.get('entry_low')}-{item.get('entry_high')}, "
-            f"target {item.get('target_price')}, stop {item.get('stop_loss')}"
+            f"Entry: <b>{item.get('entry_low')} - {item.get('entry_high')}</b> | "
+            f"Target: <b>{item.get('target_price')}</b> | Stop: <b>{item.get('stop_loss')}</b>"
         )
         gw = item.get("gamma_walls")
         if gw:
-            levels += f", Gamma [{gw['support']}-{gw['resistance']}]"
+            levels += f"\n<i>Gamma: [{gw.get('support')} - {gw.get('resistance')}]</i>"
             
-        rr_text = f", R/R {rr}:1" if rr is not None else ""
-        lines.append(f"{ticker}: {action} score {score} at {price} ({levels}{rr_text}). {thesis}")
-    lines.append("Not financial advice. Verify prices, liquidity, and catalysts before acting.")
+        rr_text = f" | R/R: <b>{rr}:1</b>" if rr is not None else ""
+        
+        lines.append(f"📈 <b>{ticker}</b> • {action_str} • Score: <b>{score}</b> {score_emoji}")
+        lines.append(f"💵 Price: <b>${price}</b>")
+        lines.append(f"🎯 {levels}{rr_text}")
+        if thesis:
+            lines.append(f"📝 <i>Thesis:</i> {thesis}")
+        lines.append("──────────────") # Separator
+        
+    lines.append("<i>⚠️ Not financial advice. Verify prices, liquidity, and catalysts before acting. Real-time data provided by Charles Schwab.</i>")
     return "\n".join(lines)

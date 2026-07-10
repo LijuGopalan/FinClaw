@@ -21,11 +21,10 @@ load_dotenv()
 logger = logging.getLogger("finclaw.llm")
 
 _API_KEY = os.getenv("GOOGLE_API_KEY")
-_MODEL_NAME = "gemini-3.1-pro-preview"
+_MODEL_NAME = "gemini-2.5-flash"
 _MAX_RETRIES = 3
 _RETRY_BASE  = 2   # seconds
-_REQUEST_TIMEOUT = 150  # seconds — raised from 90s; Gemini Pro on long prompts
-                        # can take 100-120s. Must be < agents.defaults.timeoutSeconds (300s)
+_REQUEST_TIMEOUT = 150  # seconds
 
 client = None
 if _API_KEY:
@@ -161,6 +160,16 @@ def build_market_context(api_data: dict) -> str:
         for a in alerts[:3]:
             ts = (a.get("timestamp") or "")[:16].replace("T", " ")
             lines.append(f"  [{ts}] {a.get('title', '')}")
+
+    # User requested quotes
+    user_quotes = api_data.get("user_quotes", {})
+    if user_quotes:
+        lines.append("\nUSER REQUESTED DATA:")
+        for t, q in user_quotes.items():
+            if "error" in q:
+                lines.append(f"  {t:6s} | Data unavailable")
+            else:
+                lines.append(f"  {t:6s} | ${q.get('price', 0):.2f} | {q.get('change_pct', 0):+.2f}% | Vol: {q.get('volume', 0):,}")
 
     lines.append("\n=== END MARKET DATA ===")
     return "\n".join(lines)

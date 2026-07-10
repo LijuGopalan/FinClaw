@@ -735,17 +735,17 @@ def api_config_watchlist():
 def api_health():
     """Health check endpoint — includes data source status."""
     try:
-        from schwab_client import schwab_available
-        schwab_on = schwab_available()
+        from skills.ibkr_client import ibkr_available
+        ibkr_on = ibkr_available()
     except ImportError:
-        schwab_on = False
+        ibkr_on = False
 
     return jsonify({
         "status":   "healthy",
         "agent":    "FinClaw",
         "version":  "2.2.0",
         "data_sources": {
-            "schwab":  {"active": schwab_on,        "label": "Charles Schwab (production)"},
+            "ibkr":    {"active": ibkr_on,        "label": "Interactive Brokers (production)"},
             "tradier": {"active": bool(os.getenv("TRADIER_API_KEY")), "label": "Tradier"},
             "yfinance":{"active": True,              "label": "yfinance (fallback)"},
         },
@@ -754,63 +754,51 @@ def api_health():
 
 
 # ============================================================
-# SCHWAB API STATUS & AUTH ENDPOINTS
+# IBKR API STATUS & AUTH ENDPOINTS
 # ============================================================
-@app.route("/api/schwab/status")
-def api_schwab_status():
-    """Return the current Schwab API authentication status."""
+@app.route("/api/ibkr/status")
+def api_ibkr_status():
+    """Return the current IBKR API connection status."""
     try:
-        from schwab_client import (
-            schwab_available, SCHWAB_API_KEY,
-            SCHWAB_CALLBACK_URL, _TOKEN_PATH,
+        from skills.ibkr_client import (
+            ibkr_available, IBKR_HOST, IBKR_PORT
         )
-        import os as _os
-        token_exists = _os.path.exists(_TOKEN_PATH)
-        active       = schwab_available()
+        active = ibkr_available()
         return jsonify({
             "authenticated":   active,
-            "token_file":      _TOKEN_PATH,
-            "token_exists":    token_exists,
-            "api_key_set":     bool(SCHWAB_API_KEY),
-            "callback_url":    SCHWAB_CALLBACK_URL,
+            "host":            IBKR_HOST,
+            "port":            IBKR_PORT,
             "instructions":    (
-                "Run `python skills/schwab_client.py` from the project root "
-                "to complete OAuth2 authentication, then restart the server."
-                if not active else "Schwab API is authenticated and active."
+                f"Ensure IB Gateway or TWS is running locally on port {IBKR_PORT}."
+                if not active else "IBKR API is connected and active."
             ),
         })
     except ImportError:
         return jsonify({
             "authenticated": False,
-            "error": "schwab-py not installed. Run: pip install schwab-py",
+            "error": "ib_async not installed. Run: pip install ib_async",
         })
 
-
-@app.route("/api/schwab/reauth", methods=["POST"])
-def api_schwab_reauth():
+@app.route("/api/ibkr/reauth", methods=["POST"])
+def api_ibkr_reauth():
     """
-    Trigger a Schwab token refresh (non-interactive).
-    For first-time auth, run `python skills/schwab_client.py` from terminal.
+    Trigger a forced reconnect to IB Gateway.
     """
     try:
-        from schwab_client import schwab_available, _TOKEN_PATH, _init_attempted
-        import schwab_client as _sc
-        # Reset state so next call re-tries
-        _sc._init_attempted = False
-        _sc._schwab_available = False
-        _sc._client = None
-        _sc._ensure_client(interactive=False)
-        if schwab_available():
-            return jsonify({"status": "success", "message": "Schwab token reloaded."})
+        import skills.ibkr_client as _ic
+        _ic._ibkr_available = False
+        if _ic._ib:
+            _ic._ib.disconnect()
+            _ic._ib = None
+        _ic._ensure_client()
+        if _ic.ibkr_available():
+            return jsonify({"status": "success", "message": "IBKR reconnected."})
         else:
             return jsonify({
                 "status": "needs_auth",
                 "message": (
-                    "No valid token found. "
-                    "Run `python skills/schwab_client.py` from the project root "
-                    "to complete first-time OAuth2 login."
-                ),
-                "token_path": _TOKEN_PATH,
+                    f"Could not connect to IB Gateway on port {_ic.IBKR_PORT}."
+                )
             }), 202
     except Exception as e:
         return jsonify({"error": str(e)}), 500

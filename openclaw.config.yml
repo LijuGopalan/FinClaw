@@ -11,14 +11,14 @@ models:
     max_tokens: 8192
     temperature: 0.1
     purpose: complex_analysis
-    timeoutSeconds: 180        # Must be > _REQUEST_TIMEOUT (150s) in llm.py
+    timeoutSeconds: 180
   secondary:
     provider: google
     model_id: gemini-3-flash-preview
     api_key_env: GOOGLE_API_KEY
     max_tokens: 2048
     temperature: 0.1
-    timeoutSeconds: 60         # Flash is fast; 60s is generous
+    timeoutSeconds: 60
   intraday:
     provider: google
     model_id: gemini-3-flash-preview
@@ -26,12 +26,10 @@ models:
     max_tokens: 2048
     temperature: 0.1
     purpose: intraday_scan
-    timeoutSeconds: 60         # Flash is fast; 60s is generous
-
+    timeoutSeconds: 60
 agents:
   defaults:
-    timeoutSeconds: 600        # Whole agent-run ceiling — data fetching + LLM can take ~3 min
-
+    timeoutSeconds: 600
 data_sources:
   tradier:
     enabled: false
@@ -74,8 +72,8 @@ monitoring:
   schedule:
     premarket_scan: 08:15
     intraday_scan: '*/15 8-16 * * 1-5'
-    midday_scan: 12:00
-    postmarket_scan: 16:05
+    midday_scan: 720
+    postmarket_scan: 965
   opportunities:
     default_universe_limit: 24
     scheduled_universe_limit: 40
@@ -162,10 +160,9 @@ logging:
   file: ./logs/finclaw.log
   max_size_mb: 50
   rotate_count: 5
-
 execution:
   enabled: true
-  environment: "paper"
+  environment: paper
   max_position_size_pct: 0.05
   max_daily_loss_pct: 0.02
-  instrument_type: "shares"
+  instrument_type: shares
