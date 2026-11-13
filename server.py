@@ -46,6 +46,11 @@ from opportunity_engine import (
     get_opportunities,
 )
 
+from deep_analysis import (
+    generate_institutional_report,
+    red_team_validate,
+)
+
 from db import (
     init_db,
     save_signal,
@@ -525,6 +530,35 @@ def api_opportunities():
     return jsonify(result)
 
 
+@app.route("/api/analyze/<ticker>", methods=["GET"])
+def api_analyze_ticker(ticker):
+    """Run an on-demand institutional research memo for a ticker using Qwen 2.5."""
+    clean_ticker = validate_ticker(ticker)
+    if not clean_ticker:
+        return jsonify({"error": f"Invalid ticker symbol: {ticker}"}), 400
+    try:
+        report = generate_institutional_report(clean_ticker)
+        return jsonify(report)
+    except Exception as e:
+        logger.error(f"Failed institutional analysis for {ticker}: {e}")
+        return jsonify({"error": str(e), "ticker": clean_ticker}), 500
+
+
+@app.route("/api/redteam/<ticker>", methods=["GET", "POST"])
+def api_redteam_ticker(ticker):
+    """Run an adversarial Red Team risk audit for a candidate setup using Qwen 2.5."""
+    clean_ticker = validate_ticker(ticker)
+    if not clean_ticker:
+        return jsonify({"error": f"Invalid ticker symbol: {ticker}"}), 400
+    try:
+        setup_data = request.json if request.is_json else None
+        audit = red_team_validate(clean_ticker, setup_data)
+        return jsonify(audit)
+    except Exception as e:
+        logger.error(f"Failed red team audit for {ticker}: {e}")
+        return jsonify({"error": str(e), "ticker": clean_ticker}), 500
+
+
 @app.route("/api/opportunities/scan", methods=["POST"])
 def api_opportunities_scan():
     """
@@ -740,17 +774,52 @@ def api_health():
     except ImportError:
         ibkr_on = False
 
+    try:
+        from skills.schwab_client import schwab_available
+        schwab_on = schwab_available()
+    except ImportError:
+        schwab_on = False
+
     return jsonify({
         "status":   "healthy",
         "agent":    "FinClaw",
         "version":  "2.2.0",
         "data_sources": {
-            "ibkr":    {"active": ibkr_on,        "label": "Interactive Brokers (production)"},
+            "schwab":  {"active": schwab_on,       "label": "Charles Schwab (primary)"},
+            "ibkr":    {"active": ibkr_on,         "label": "Interactive Brokers"},
             "tradier": {"active": bool(os.getenv("TRADIER_API_KEY")), "label": "Tradier"},
-            "yfinance":{"active": True,              "label": "yfinance (fallback)"},
+            "yfinance":{"active": True,            "label": "yfinance (fallback)"},
         },
         "timestamp": datetime.utcnow().isoformat(),
     })
+
+
+# ============================================================
+# SCHWAB API STATUS ENDPOINT
+# ============================================================
+@app.route("/api/schwab/status")
+def api_schwab_status():
+    """Return the current Schwab API connection status."""
+    try:
+        from skills.schwab_client import schwab_available, APP_KEY, TOKEN_PATH
+        import os
+        active = schwab_available()
+        token_exists = os.path.exists(TOKEN_PATH) if TOKEN_PATH else False
+        return jsonify({
+            "authenticated":   active,
+            "token_file":      token_exists,
+            "app_key_set":     bool(APP_KEY),
+            "instructions":    (
+                "Schwab API is connected and active — primary data source."
+                if active else
+                "Run setup_schwab.py to authenticate, or update SCHWAB_REFRESH_TOKEN in .env."
+            ),
+        })
+    except ImportError:
+        return jsonify({
+            "authenticated": False,
+            "error": "schwab-py not installed. Run: pip install schwab-py",
+        })
 
 
 # ============================================================

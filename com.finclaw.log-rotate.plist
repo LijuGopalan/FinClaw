@@ -1,0 +1,26 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.finclaw.log-rotate</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/bin/bash</string>
+        <string>/Users/adgroup/.gemini/antigravity/scratch/openclaw-financial-assistant/rotate_logs.sh</string>
+    </array>
+
+    <!-- Run every 6 hours (21600 seconds) -->
+    <key>StartInterval</key>
+    <integer>21600</integer>
+
+    <key>RunAtLoad</key>
+    <false/>
+
+    <key>StandardOutPath</key>
+    <string>/Users/adgroup/.gemini/antigravity/scratch/openclaw-financial-assistant/log_rotate.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/adgroup/.gemini/antigravity/scratch/openclaw-financial-assistant/log_rotate.log</string>
+</dict>
+</plist>

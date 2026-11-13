@@ -15,6 +15,7 @@ import ib_async as iba
 load_dotenv()
 logger = logging.getLogger("finclaw.ibkr")
 
+IBKR_ENABLED = os.getenv("IBKR_ENABLED", "false").lower() in ("true", "1", "yes")
 IBKR_HOST = os.getenv("IBKR_HOST", "127.0.0.1")
 IBKR_PORT = int(os.getenv("IBKR_PORT", 4001)) # 4001 for IB Gateway, 7496 for TWS
 IBKR_CLIENT_ID = int(os.getenv("IBKR_CLIENT_ID", 1))
@@ -31,6 +32,9 @@ _COOLDOWN_SECONDS = 60
 
 def _ensure_client():
     global _ib, _ibkr_available, _last_attempt
+    if not IBKR_ENABLED:
+        _ibkr_available = False
+        return
     if _ib is not None and _ib.isConnected():
         _ibkr_available = True
         return

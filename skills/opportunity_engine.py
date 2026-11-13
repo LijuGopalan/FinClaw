@@ -12,8 +12,13 @@ from datetime import datetime, time
 from zoneinfo import ZoneInfo
 
 import pandas as pd
-import yfinance as yf
+
 import yaml
+
+try:
+    from schwab_client import schwab_available
+except ImportError:
+    from .schwab_client import schwab_available
 
 try:
     from financial_skills import (
@@ -400,7 +405,7 @@ def get_intraday_snapshot(ticker, interval="5m", period="5d"):
             "vwap_distance_pct": _round(vwap_distance_pct),
             "latest_bar_volume": volume,
             "bar_count": len(hist),
-            "source": "yfinance intraday (unofficial/delayed)",
+            "source": "Charles Schwab" if schwab_available() else "yfinance intraday (unofficial/delayed)",
             "timestamp": datetime.utcnow().isoformat(),
         }
     except Exception as e:
@@ -1093,5 +1098,6 @@ def build_opportunity_brief(scan_result, max_items=5):
             lines.append(f"📝 <i>Thesis:</i> {thesis}")
         lines.append("──────────────") # Separator
         
+    lines.append("<i>💡 Use /analyze &lt;ticker&gt; or /redteam &lt;ticker&gt; for Qwen 2.5 risk validation before entering.</i>")
     lines.append("<i>⚠️ Not financial advice. Verify prices, liquidity, and catalysts before acting. Real-time data provided by Charles Schwab.</i>")
     return "\n".join(lines)

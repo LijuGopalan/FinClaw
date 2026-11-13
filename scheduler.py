@@ -123,7 +123,7 @@ def trigger_llm_brief(brief_type: str):
     """Fetch live data, ask Gemini Flash to write an intelligent brief, send to Telegram."""
     def _run():
         try:
-            from llm import ask, build_market_context
+            from llm import ask, build_market_context, earnings_watch_tickers, apply_earnings_guard, EARNINGS_TASK_LINE
         except ImportError as e:
             logging.error("LLM module not available: %s", e)
             return
@@ -138,6 +138,8 @@ def trigger_llm_brief(brief_type: str):
         fg        = _api_get("/market/fear-greed",                   timeout=20)
         alerts    = _api_get("/alerts?limit=5",                      timeout=20)
         opps      = _api_get("/opportunities?limit=8&session=auto",  timeout=90)
+        earnings_tickers = earnings_watch_tickers(portfolio if isinstance(portfolio, dict) else {})
+        earnings  = _api_get("/earnings/calendar?tickers=" + ",".join(earnings_tickers), timeout=60)
 
         api_data = {
             "portfolio":      portfolio,
@@ -145,6 +147,7 @@ def trigger_llm_brief(brief_type: str):
             "fear_greed":     fg,
             "alerts":         (alerts if isinstance(alerts, list) else alerts.get("alerts", []) if isinstance(alerts, dict) else []),
             "opportunities":  (opps.get("opportunities", []) if isinstance(opps, dict) else opps if isinstance(opps, list) else []),
+            "earnings":       earnings if isinstance(earnings, dict) else {},
         }
 
         context = build_market_context(api_data)
@@ -155,35 +158,39 @@ def trigger_llm_brief(brief_type: str):
                 "It is pre-market (8:15 AM CST). Write a sharp pre-market brief covering:\n"
                 "1. Market overnight context and key index levels\n"
                 "2. Key risks for today\n"
-                "3. Top 2-3 portfolio holdings to watch today with entry/exit levels\n"
+                "3. Top 2-3 portfolio holdings to watch today\n"
                 "4. Fear & Greed interpretation\n"
+                f"{EARNINGS_TASK_LINE}\n"
+                "Note: Distinguish strictly between Today's Change (%) and All-Time P&L (%). Do not invent stop losses if none are set.\n"
                 "Keep it under 350 words. Format with clear section headers."
             )
         elif brief_type == "midday":
             task = (
                 "It is midday (12:00 PM CST). Write a concise midday market update covering:\n"
                 "1. How the morning session went (indices, sentiment)\n"
-                "2. Portfolio holdings that need attention (up big, down big, near stop loss)\n"
+                "2. Portfolio holdings today (use 'Today' change %, DO NOT confuse with all-time total P&L)\n"
                 "3. Top 1-2 afternoon scalp or swing setups from the opportunity scan\n"
                 "4. Any action needed (hold, trail stop, add, trim)\n"
-                "Keep it under 300 words."
+                "Keep it under 300 words.\n"
+                f"{EARNINGS_TASK_LINE}"
             )
         elif brief_type == "close":
             task = (
                 "Market is closed (4:05 PM CST). Write an end-of-day portfolio review:\n"
-                "1. How the portfolio performed today (winners, losers)\n"
-                "2. Any positions near their stop-loss that need monitoring overnight\n"
+                "1. How the portfolio performed TODAY (use 'Today' change %, DO NOT report all-time loss as today's loss!)\n"
+                "2. Any positions near stop-loss (if no stops are set in data, explicitly state 'No stop-loss configured')\n"
                 "3. Top 2 overnight/next-day watchlist ideas from the scan\n"
                 "4. One-sentence macro read for tomorrow\n"
-                "5. Rebalancing suggestion if any position exceeds 8% of portfolio\n"
-                "Keep it under 400 words."
+                "5. Rebalancing suggestion if any position exceeds 10% concentration\n"
+                "Keep it under 350 words.\n"
+                f"{EARNINGS_TASK_LINE}"
             )
         else:
             task = "Write a brief market summary based on the data provided."
 
         prompt = f"{context}\n\n---\nYOUR TASK:\n{task}"
 
-        response = ask(prompt, max_tokens=8192)
+        response = apply_earnings_guard(ask(prompt, max_tokens=8192), api_data)
 
         # Format and send
         header = {

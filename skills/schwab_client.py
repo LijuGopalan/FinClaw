@@ -43,6 +43,21 @@ def schwab_available() -> bool:
     _ensure_client()
     return _schwab_available
 
+def _extract_change_pct(quote: dict):
+    """Extract percentage change from Schwab quote data."""
+    for key in ("netPercentChange", "netPercentChangeInDouble", "markPercentChange"):
+        val = quote.get(key)
+        if val is not None:
+            return round(float(val), 4)
+    net = quote.get("netChange")
+    close = quote.get("closePrice") or quote.get("openPrice")
+    if net is not None and close:
+        try:
+            return round((float(net) / float(close)) * 100.0, 4)
+        except ZeroDivisionError:
+            pass
+    return None
+
 def get_quote(ticker: str) -> dict:
     if not schwab_available():
         return None
@@ -63,7 +78,7 @@ def get_quote(ticker: str) -> dict:
             "ticker": ticker,
             "price": quote.get("lastPrice"),
             "change": quote.get("netChange"),
-            "change_pct": quote.get("netPercentChangeInDouble"),
+            "change_pct": _extract_change_pct(quote),
             "open": quote.get("openPrice"),
             "high": quote.get("highPrice"),
             "low": quote.get("lowPrice"),
@@ -94,7 +109,7 @@ def get_quotes_batch(tickers: list) -> dict:
             results[t] = {
                 "ticker": t,
                 "price": quote.get("lastPrice"),
-                "change_pct": quote.get("netPercentChangeInDouble"),
+                "change_pct": _extract_change_pct(quote),
                 "volume": quote.get("totalVolume")
             }
         return results
@@ -114,47 +129,40 @@ def get_price_history(ticker: str, period: str = "1y", interval: str = "1d"):
     try:
         import schwab
         
-        # Map parameters to schwab-py enums
-        period_type = schwab.client.Client.PriceHistory.PeriodType.MONTH
-        period_val = 1
-        freq_type = schwab.client.Client.PriceHistory.FrequencyType.DAILY
-        freq_val = 1
-        
-        if interval == "1d":
-            freq_type = schwab.client.Client.PriceHistory.FrequencyType.DAILY
-            freq_val = 1
-            if period == "1mo":
-                period_type = schwab.client.Client.PriceHistory.PeriodType.MONTH
-                period_val = 1
-            elif period == "3mo":
-                period_type = schwab.client.Client.PriceHistory.PeriodType.MONTH
-                period_val = 3
-            elif period == "6mo":
-                period_type = schwab.client.Client.PriceHistory.PeriodType.MONTH
-                period_val = 6
-            elif period == "1y":
-                period_type = schwab.client.Client.PriceHistory.PeriodType.YEAR
-                period_val = 1
-            elif period == "5d":
-                period_type = schwab.client.Client.PriceHistory.PeriodType.DAY
-                period_val = 5
-        elif interval in ["1m", "5m", "15m", "30m"]:
-            freq_type = schwab.client.Client.PriceHistory.FrequencyType.MINUTE
-            freq_val = int(interval.replace("m", ""))
-            period_type = schwab.client.Client.PriceHistory.PeriodType.DAY
-            period_val = 1 if period == "1d" else 5 if period == "5d" else 1
+        if interval == "1m":
+            r = _client.get_price_history_every_minute(ticker)
+        elif interval == "5m":
+            r = _client.get_price_history_every_five_minutes(ticker)
+        elif interval == "15m":
+            r = _client.get_price_history_every_fifteen_minutes(ticker)
+        elif interval == "30m":
+            r = _client.get_price_history_every_thirty_minutes(ticker)
+        elif interval in ["1wk", "1w"]:
+            r = _client.get_price_history_every_week(ticker)
+        else: # default to 1d
+            r = _client.get_price_history_every_day(ticker)
 
-        r = _client.get_price_history_every_day(
-            ticker,
-            period_type=period_type,
-            period=period_val,
-            frequency_type=freq_type,
-            frequency=freq_val
-        )
         r.raise_for_status()
         data = r.json()
         
         candles = data.get("candles", [])
+        
+        # Slicing based on period requested
+        limit = None
+        if period == "5d":
+            limit = 5 if interval == "1d" else 5 * 78
+        elif period == "1mo":
+            limit = 22 if interval == "1d" else 22 * 78
+        elif period == "3mo":
+            limit = 65 if interval == "1d" else 65 * 78
+        elif period == "6mo":
+            limit = 130 if interval == "1d" else None
+        elif period == "1y":
+            limit = 252 if interval == "1d" else None
+
+        if limit and len(candles) > limit:
+            candles = candles[-limit:]
+
         formatted = []
         for c in candles:
             # Schwab returns epoch in milliseconds
@@ -171,6 +179,73 @@ def get_price_history(ticker: str, period: str = "1y", interval: str = "1d"):
     except Exception as e:
         logger.error(f"Schwab get_price_history error for {ticker}: {e}")
         return None
+
+def get_fundamentals(ticker: str) -> dict:
+    """
+    Fetch fundamental data from Schwab's instruments endpoint.
+    Returns PE, EPS, market cap, dividend info, etc. when available.
+    Falls back gracefully — returns None if Schwab doesn't have the data.
+    """
+    if not schwab_available():
+        return None
+
+    try:
+        import schwab
+        r = _client.get_instruments(ticker, schwab.client.Client.Instrument.Projection.FUNDAMENTAL)
+        r.raise_for_status()
+        data = r.json()
+
+        # Schwab returns {"instruments": [{...}]} — extract first match
+        instruments = data.get("instruments", [])
+        if not instruments:
+            # Fallback: try ticker-keyed format
+            inst = data.get(ticker)
+            if not inst:
+                return None
+        else:
+            inst = instruments[0]
+
+        fundamental = inst.get("fundamental", {})
+
+        if not fundamental:
+            return None
+
+        return {
+            "ticker": ticker,
+            "name": inst.get("description"),
+            "exchange": inst.get("exchange"),
+            "pe_ratio": fundamental.get("peRatio"),
+            "peg_ratio": fundamental.get("pegRatio"),
+            "pb_ratio": fundamental.get("pbRatio"),
+            "eps": fundamental.get("epsTTM"),
+            "dividend_yield": fundamental.get("dividendYield"),
+            "dividend_amount": fundamental.get("dividendAmount"),
+            "dividend_date": fundamental.get("dividendDate"),
+            "market_cap": fundamental.get("marketCap"),
+            "revenue_per_share": fundamental.get("revPerShare"),
+            "gross_margin_ttm": fundamental.get("grossMarginTTM"),
+            "net_profit_margin_ttm": fundamental.get("netProfitMarginTTM"),
+            "operating_margin_ttm": fundamental.get("operatingMarginTTM"),
+            "return_on_equity": fundamental.get("returnOnEquity"),
+            "return_on_assets": fundamental.get("returnOnAssets"),
+            "debt_to_equity": fundamental.get("debtToEquity") or fundamental.get("totalDebtToEquity"),
+            "current_ratio": fundamental.get("currentRatio"),
+            "quick_ratio": fundamental.get("quickRatio"),
+            "beta": fundamental.get("beta"),
+            "52_week_high": fundamental.get("52WeekHigh") or fundamental.get("high52"),
+            "52_week_low": fundamental.get("52WeekLow") or fundamental.get("low52"),
+            "shares_outstanding": fundamental.get("sharesOutstanding"),
+            "short_interest_ratio": fundamental.get("shortIntDayToCover"),
+            "vol_1day_avg": fundamental.get("vol1DayAvg"),
+            "vol_10day_avg": fundamental.get("vol10DayAvg"),
+            "vol_3month_avg": fundamental.get("vol3MonthAvg"),
+            "source": "Charles Schwab",
+            "timestamp": datetime.datetime.utcnow().isoformat()
+        }
+    except Exception as e:
+        logger.error(f"Schwab get_fundamentals error for {ticker}: {e}")
+        return None
+
 
 def get_option_chain(ticker: str, expiry: str = None) -> dict:
     if not schwab_available():

@@ -19,6 +19,10 @@ pkill -f "python.*telegram_bot\.py" 2>/dev/null && sleep 0.5 || true
 pkill -f "python.*server\.py"       2>/dev/null && sleep 0.5 || true
 rm -f /tmp/finclaw_telegram_bot.pid
 
+echo "  → Ensuring port 5055 is free..."
+lsof -ti:5055 | xargs kill -9 2>/dev/null || true
+sleep 1
+
 echo "  → Scheduler Daemon (algorithmic + LLM briefs)"
 ./venv/bin/python scheduler.py &
 

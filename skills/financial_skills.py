@@ -35,16 +35,44 @@ import numpy as np
 import requests
 
 # FIX FOR yfinance [Errno 24] Too many open files:
-# By default, yf.Ticker creates a new SQLite connection every time.
-# We monkey-patch it here to reuse objects for identical tickers.
+# Root causes:
+#   1. yfinance >=0.2 caches data in a per-process SQLite DB; each unique
+#      Ticker() call that hits the cache opens an fd that is never closed.
+#   2. yfinance also uses a requests.Session internally — with many tickers
+#      polled in rapid succession this fans out into many open sockets.
+# Solution:
+#   a. Share one requests.Session across all Ticker objects so the HTTP
+#      connection pool stays bounded (replaces the previous object-cache
+#      monkey-patch, which didn't actually close SQLite fds).
+#   b. Disable yfinance's SQLite cache entirely — we have our own TTL
+#      cache layer above, so the extra disk cache just wastes fds.
+
+import requests as _requests
+
+_yf_session = _requests.Session()
+_yf_session.headers.update({"User-Agent": "FinClaw/1.0"})
+
+# Configure yfinance cache to a clean temp directory
+import tempfile
+_yf_cache_dir = os.path.join(tempfile.gettempdir(), "py-yfinance")
+os.makedirs(_yf_cache_dir, exist_ok=True)
+try:
+    yf.set_tz_cache_location(_yf_cache_dir)
+except Exception:
+    pass
+
 _original_yf_ticker = yf.Ticker
-_yf_cache = {}
+_yf_ticker_objects: dict = {}
 
 def _cached_yf_ticker(ticker, *args, **kwargs):
+    """Return a cached Ticker that reuses the shared session, eliminating
+    per-ticker fd leaks from repeated instantiation."""
     t_upper = str(ticker).upper()
-    if t_upper not in _yf_cache:
-        _yf_cache[t_upper] = _original_yf_ticker(ticker, *args, **kwargs)
-    return _yf_cache[t_upper]
+    if t_upper not in _yf_ticker_objects:
+        obj = _original_yf_ticker.__new__(_original_yf_ticker)
+        _original_yf_ticker.__init__(obj, ticker, session=_yf_session)
+        _yf_ticker_objects[t_upper] = obj
+    return _yf_ticker_objects[t_upper]
 
 yf.Ticker = _cached_yf_ticker
 from datetime import datetime, timedelta
@@ -54,7 +82,7 @@ from functools import wraps
 load_dotenv()
 
 from skills.ibkr_client import ibkr_available, get_quote as _ibkr_quote, get_price_history as _ibkr_price_history, get_intraday_history as _ibkr_intraday_history, get_quotes_batch as _ibkr_quotes_batch
-from skills.schwab_client import schwab_available, get_quote as _schwab_quote, get_price_history as _schwab_price_history, get_quotes_batch as _schwab_quotes_batch, get_option_chain as _schwab_option_chain
+from skills.schwab_client import schwab_available, get_quote as _schwab_quote, get_price_history as _schwab_price_history, get_quotes_batch as _schwab_quotes_batch, get_option_chain as _schwab_option_chain, get_fundamentals as _schwab_fundamentals
 
 
 # ============================================================
@@ -213,12 +241,19 @@ def get_stock_quote(ticker: str) -> dict:
     # ── 3. yfinance (unofficial — last resort) ────────────────────────────────
     try:
         stock = yf.Ticker(ticker)
-        info  = stock.info
         hist  = stock.history(period="5d")
-        price = hist["Close"].iloc[-1] if not hist.empty else None
+        if hist.empty:
+            return {"error": f"No data found for {ticker}", "ticker": ticker}
+        price = hist["Close"].iloc[-1]
         prev  = hist["Close"].iloc[-2] if len(hist) > 1 else price
         change = price - prev if price and prev else None
         change_pct = (change / prev * 100) if prev else None
+
+        info = {}
+        try:
+            info = stock.info or {}
+        except Exception:
+            pass
 
         return {
             "ticker": ticker,
@@ -228,7 +263,7 @@ def get_stock_quote(ticker: str) -> dict:
             "low": round(float(hist["Low"].iloc[-1]), 2) if not hist.empty else None,
             "change": round(float(change), 2) if change else None,
             "change_pct": round(float(change_pct), 2) if change_pct else None,
-            "volume": info.get("volume"),
+            "volume": info.get("volume") or (int(hist["Volume"].iloc[-1]) if not hist.empty else None),
             "avg_volume": info.get("averageVolume"),
             "high_52w": info.get("fiftyTwoWeekHigh"),
             "low_52w":  info.get("fiftyTwoWeekLow"),
@@ -954,40 +989,108 @@ def get_news(ticker: str = None, query: str = None, limit: int = 10) -> dict:
 # ============================================================
 # SKILL: Get Earnings Calendar
 # ============================================================
+def coerce_earnings_dates(raw) -> list:
+    """
+    Normalize a yfinance earnings-date field to ISO dates (YYYY-MM-DD).
+
+    Yahoo often returns a one-item list, sometimes a date object, and sometimes
+    a two-date estimate window. A bare string must not be indexed with [0] —
+    that turns "2027-01-27" into "2".
+    """
+    if raw is None:
+        return []
+    values = list(raw) if isinstance(raw, (list, tuple)) else [raw]
+    dates = []
+    for value in values:
+        iso = _earnings_value_to_iso(value)
+        if iso and iso not in dates:
+            dates.append(iso)
+    return dates
+
+
+def _earnings_value_to_iso(value) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, str):
+        text = value.strip()
+        if not text or text.lower() in {"unknown", "nan", "none", "nat"}:
+            return ""
+        if len(text) >= 10 and text[4] == "-" and text[7] == "-":
+            return text[:10]
+        return ""
+    if hasattr(value, "to_pydatetime"):
+        try:
+            value = value.to_pydatetime()
+        except Exception:
+            return ""
+    if isinstance(value, datetime):
+        return value.date().isoformat()
+    if hasattr(value, "isoformat") and hasattr(value, "year"):
+        try:
+            return value.isoformat()[:10]
+        except Exception:
+            return ""
+    return ""
+
+
+def _earnings_row(ticker: str, dates: list, eps_estimate=None, revenue_estimate=None) -> dict:
+    return {
+        "ticker": ticker,
+        "earnings_date": dates[0] if dates else "Unknown",
+        "earnings_dates": dates,
+        "eps_estimate": eps_estimate,
+        "revenue_estimate": revenue_estimate,
+    }
+
+
 @cached(ttl_seconds=3600)
 def get_earnings_calendar(tickers: list = None) -> dict:
     """
     Returns upcoming earnings dates for given tickers.
+
+    Dates are Yahoo estimates. A multi-day value is an estimate window, not a
+    confirmed report on each of those days.
     """
     tickers = tickers or ["AAPL", "NVDA", "MSFT", "AMZN", "TSLA", "META", "GOOGL"]
     results = []
+    failures = 0
 
     for t in tickers:
         try:
             stock = yf.Ticker(t)
             cal   = stock.calendar
-            if cal is not None and not (hasattr(cal, 'empty') and cal.empty):
-                if isinstance(cal, dict):
-                    results.append({
-                        "ticker": t,
-                        "earnings_date": str(cal.get("Earnings Date", ["Unknown"])[0]) if cal.get("Earnings Date") else "Unknown",
-                        "eps_estimate": cal.get("EPS Estimate"),
-                        "revenue_estimate": cal.get("Revenue Estimate"),
-                    })
-                elif hasattr(cal, 'columns') and len(cal.columns) > 0:
-                    results.append({
-                        "ticker": t,
-                        "earnings_date": str(cal.columns[0].date()),
-                        "eps_estimate": cal.get("Earnings Average", {}).get(cal.columns[0]) if "Earnings Average" in cal.index else None,
-                    })
-        except Exception:
-            pass
+            if cal is None or (hasattr(cal, "empty") and cal.empty):
+                continue
+            if isinstance(cal, dict):
+                dates = coerce_earnings_dates(cal.get("Earnings Date"))
+                results.append(_earnings_row(
+                    t,
+                    dates,
+                    eps_estimate=cal.get("EPS Estimate") or cal.get("Earnings Average"),
+                    revenue_estimate=cal.get("Revenue Estimate") or cal.get("Revenue Average"),
+                ))
+            elif hasattr(cal, "columns") and len(cal.columns) > 0:
+                dates = []
+                for col in cal.columns:
+                    dates.extend(coerce_earnings_dates(col))
+                dates = list(dict.fromkeys(dates))
+                eps = None
+                if "Earnings Average" in getattr(cal, "index", []):
+                    eps = cal.get("Earnings Average", {}).get(cal.columns[0])
+                results.append(_earnings_row(t, dates, eps_estimate=eps))
+        except Exception as exc:
+            failures += 1
+            logger.warning("earnings calendar failed for %s: %s", t, exc)
 
-    return {
+    payload = {
         "earnings": results,
-        "source": "yfinance (unofficial)",
+        "source": "yfinance (unofficial estimate)",
         "timestamp": datetime.utcnow().isoformat()
     }
+    # An empty list after every lookup failed is not "nobody reports today".
+    if failures and not results:
+        payload["error"] = f"earnings calendar failed for {failures} ticker(s)"
+    return payload
 
 
 # ============================================================
@@ -998,61 +1101,88 @@ def get_fundamentals(ticker: str) -> dict:
     """
     Returns fundamental analysis data: valuation, profitability,
     growth metrics, and financial health indicators.
+
+    Priority:
+      1. Charles Schwab (production — PE, EPS, margins, market cap)
+      2. yfinance       (unofficial — deeper data: analyst targets, cashflow, growth)
+
+    Schwab provides core valuation metrics; yfinance fills in growth,
+    cashflow, and analyst consensus. The result is a merged view.
     """
     ticker = ticker.upper().strip()
+    source = "yfinance (unofficial)"
+
+    # ── 1. Try Schwab fundamentals first ──────────────────────────────────────
+    schwab_fund = None
+    if schwab_available():
+        schwab_fund = _schwab_fundamentals(ticker)
+        if schwab_fund:
+            source = "Charles Schwab + yfinance"
+            logger.debug("[Schwab] fundamentals for %s loaded", ticker)
+
+    info = {}
     try:
         stock = yf.Ticker(ticker)
-        info = stock.info
+        info = stock.info or {}
+    except Exception as yf_err:
+        logger.warning("yfinance info failed for %s (%s)", ticker, yf_err)
+        if not schwab_fund:
+            return {"error": str(yf_err), "ticker": ticker}
+        source = "Charles Schwab"
 
-        # Valuation metrics
-        market_cap = info.get("marketCap")
-        pe_trailing = info.get("trailingPE")
+    try:
+        # Valuation metrics — prefer Schwab if available
+        market_cap = (schwab_fund or {}).get("market_cap") or info.get("marketCap")
+        pe_trailing = (schwab_fund or {}).get("pe_ratio") or info.get("trailingPE")
         pe_forward = info.get("forwardPE")
-        peg_ratio = info.get("pegRatio")
-        pb_ratio = info.get("priceToBook")
+        peg_ratio = (schwab_fund or {}).get("peg_ratio") or info.get("pegRatio")
+        pb_ratio = (schwab_fund or {}).get("pb_ratio") or info.get("priceToBook")
         ps_ratio = info.get("priceToSalesTrailing12Months")
         ev_ebitda = info.get("enterpriseToEbitda")
         ev_revenue = info.get("enterpriseToRevenue")
 
-        # Profitability
-        profit_margin = info.get("profitMargins")
-        operating_margin = info.get("operatingMargins")
-        gross_margin = info.get("grossMargins")
-        roe = info.get("returnOnEquity")
-        roa = info.get("returnOnAssets")
+        # Profitability — prefer Schwab if available
+        profit_margin = (schwab_fund or {}).get("net_profit_margin_ttm") or info.get("profitMargins")
+        operating_margin = (schwab_fund or {}).get("operating_margin_ttm") or info.get("operatingMargins")
+        gross_margin = (schwab_fund or {}).get("gross_margin_ttm") or info.get("grossMargins")
+        roe = (schwab_fund or {}).get("return_on_equity") or info.get("returnOnEquity")
+        roa = (schwab_fund or {}).get("return_on_assets") or info.get("returnOnAssets")
 
-        # Growth
+        # Growth (yfinance only)
         revenue_growth = info.get("revenueGrowth")
         earnings_growth = info.get("earningsGrowth")
         earnings_quarterly_growth = info.get("earningsQuarterlyGrowth")
 
-        # Financial health
+        # Financial health — prefer Schwab if available
         total_debt = info.get("totalDebt")
         total_cash = info.get("totalCash")
-        current_ratio = info.get("currentRatio")
-        debt_to_equity = info.get("debtToEquity")
+        current_ratio = (schwab_fund or {}).get("current_ratio") or info.get("currentRatio")
+        debt_to_equity = (schwab_fund or {}).get("debt_to_equity") or info.get("debtToEquity")
         free_cashflow = info.get("freeCashflow")
         operating_cashflow = info.get("operatingCashflow")
 
-        # Per-share data
-        eps_trailing = info.get("trailingEps")
+        # Per-share data — prefer Schwab if available
+        eps_trailing = (schwab_fund or {}).get("eps") or info.get("trailingEps")
         eps_forward = info.get("forwardEps")
         book_value = info.get("bookValue")
-        revenue_per_share = info.get("revenuePerShare")
+        revenue_per_share = (schwab_fund or {}).get("revenue_per_share") or info.get("revenuePerShare")
 
-        # Dividend
-        dividend_yield = info.get("dividendYield")
-        dividend_rate = info.get("dividendRate")
+        # Dividend — prefer Schwab if available
+        dividend_yield = (schwab_fund or {}).get("dividend_yield") or info.get("dividendYield")
+        dividend_rate = (schwab_fund or {}).get("dividend_amount") or info.get("dividendRate")
         payout_ratio = info.get("payoutRatio")
         ex_dividend_date = info.get("exDividendDate")
 
-        # Analyst consensus
+        # Analyst consensus (yfinance only — Schwab doesn't provide this)
         target_high = info.get("targetHighPrice")
         target_low = info.get("targetLowPrice")
         target_mean = info.get("targetMeanPrice")
         target_median = info.get("targetMedianPrice")
         recommendation = info.get("recommendationKey")
         num_analysts = info.get("numberOfAnalystOpinions")
+
+        # Company name — prefer Schwab if available
+        name = (schwab_fund or {}).get("name") or info.get("shortName") or info.get("longName")
 
         # Valuation assessment
         signals = []
@@ -1092,15 +1222,21 @@ def get_fundamentals(ticker: str) -> dict:
             signals.append(f"Analyst consensus target ${target_mean:.2f} → {upside:+.1f}% upside")
 
         def safe_pct(val):
-            return round(val * 100, 2) if val is not None else None
+            if val is None:
+                return None
+            # Schwab returns percentages (e.g. 74.6%), yfinance returns ratios (e.g. 0.746)
+            if abs(val) > 1.0:
+                return round(val, 2)
+            return round(val * 100, 2)
 
         return {
             "ticker": ticker,
-            "name": info.get("shortName") or info.get("longName"),
+            "name": name,
             "sector": info.get("sector"),
             "industry": info.get("industry"),
             "market_cap": market_cap,
             "market_cap_fmt": _format_large_number(market_cap) if market_cap else None,
+            "beta": (schwab_fund or {}).get("beta") or info.get("beta"),
             "valuation": {
                 "pe_trailing": round(pe_trailing, 2) if pe_trailing else None,
                 "pe_forward": round(pe_forward, 2) if pe_forward else None,
@@ -1151,7 +1287,7 @@ def get_fundamentals(ticker: str) -> dict:
                 "num_analysts": num_analysts,
             },
             "signals": signals,
-            "source": "yfinance (unofficial)",
+            "source": source,
             "timestamp": datetime.utcnow().isoformat()
         }
     except Exception as e:
@@ -1453,7 +1589,7 @@ def get_economic_indicators() -> dict:
 
         indicators["signals"] = signals
         indicators["timestamp"] = datetime.utcnow().isoformat()
-        indicators["source"] = "yfinance (unofficial)"
+        indicators["source"] = "Charles Schwab" if schwab_available() else "yfinance (unofficial)"
 
         return indicators
     except Exception as e:
@@ -1550,6 +1686,10 @@ def get_sector_rotation() -> dict:
     """
     Analyzes money flow between sectors to detect rotation patterns.
     Compares 1-week vs 1-month vs 3-month sector performance.
+
+    Data source priority:
+      1. Charles Schwab (production — via get_price_history cascade)
+      2. yfinance       (unofficial fallback)
     """
     sectors = {
         "XLK":  "Technology",
@@ -1567,17 +1707,16 @@ def get_sector_rotation() -> dict:
 
     results = []
 
-    # Fetch SPY once (instead of inside the loop)
-    spy = yf.Ticker("SPY")
-    spy_hist = spy.history(period="6mo")
-    spy_current = float(spy_hist["Close"].iloc[-1]) if not spy_hist.empty else 1
+    # Fetch SPY history via the Schwab-first cascade
+    spy_hist = get_price_history("SPY", period="6mo", interval="1d")
+    spy_current = float(spy_hist["Close"].iloc[-1]) if spy_hist is not None and not spy_hist.empty else 1
 
     for etf, name in sectors.items():
         try:
-            stock = yf.Ticker(etf)
-            hist = stock.history(period="6mo")
+            # Use get_price_history() which cascades Schwab → IBKR → yfinance
+            hist = get_price_history(etf, period="6mo", interval="1d")
 
-            if hist.empty:
+            if hist is None or hist.empty:
                 continue
 
             close = hist["Close"]
@@ -1597,7 +1736,7 @@ def get_sector_rotation() -> dict:
 
             # Relative strength (vs SPY)
             relative_1m = None
-            if len(close) >= 22 and len(spy_hist) >= 22:
+            if len(close) >= 22 and spy_hist is not None and len(spy_hist) >= 22:
                 sector_perf = current / float(close.iloc[-22])
                 spy_perf = spy_current / float(spy_hist["Close"].iloc[-22])
                 relative_1m = round((sector_perf / spy_perf - 1) * 100, 2)
@@ -1651,10 +1790,12 @@ def get_sector_rotation() -> dict:
             elif cyc_perf > def_perf + 2:
                 signals.append("🟢 RISK-ON ROTATION — Money flowing to growth (Tech, Discretionary, Industrials leading)")
 
+    data_source = "Charles Schwab" if schwab_available() else "yfinance (unofficial)"
+
     return {
         "sectors": results,
         "signals": signals,
-        "source": "yfinance (unofficial)",
+        "source": data_source,
         "timestamp": datetime.utcnow().isoformat()
     }
 

@@ -83,16 +83,20 @@ async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 async def cmd_help(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "🦾 <b>FinClaw Commands</b>\n\n"
+        "🧠 <b>AI & Institutional Research:</b>\n"
+        "/analyze &lt;ticker&gt; — Institutional Deep-Dive Research Memo (via Qwen 2.5)\n"
+        "/redteam &lt;ticker&gt; — Adversarial Risk Audit to catch bull traps (via Qwen 2.5)\n\n"
+        "📈 <b>Market & Screener Scans:</b>\n"
         "/scan — Run an intraday scalp scan now\n"
+        "/delivery — Run delivery volume confluence scan now\n"
         "/portfolio — Your portfolio P&amp;L summary\n"
         "/alerts — Last 5 market alerts\n"
         "/status — Server &amp; scheduler health\n"
-        "/delivery — Run delivery volume confluence scan now\n"
-        "/insiders <ticker> — Show recent insider trading\n"
-        "/feargreed — Show Fear & Greed Index\n"
+        "/insiders &lt;ticker&gt; — Show recent insider trading\n"
+        "/feargreed — Show Fear &amp; Greed Index\n"
         "/movers — Show today's market movers\n"
         "/sectors — Show sector rotation performance\n"
-        "/news <ticker> — Show latest news for a ticker\n"
+        "/news &lt;ticker&gt; — Show latest news for a ticker\n"
         "/restart — Hard restart all FinClaw background daemons\n"
         "/help — This message",
         parse_mode="HTML",
@@ -372,6 +376,90 @@ async def cmd_news(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         
     await update.message.reply_text("\n".join(lines), parse_mode="HTML", disable_web_page_preview=True)
 
+
+# ============================================================
+# /analyze <ticker> — Institutional Deep Dive Memo via Qwen 2.5
+# ============================================================
+async def cmd_analyze(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    if not ctx.args:
+        await update.message.reply_text("⚠️ Please provide a ticker: `/analyze NVDA`", parse_mode="Markdown")
+        return
+    ticker = ctx.args[0].upper().strip().replace("$", "")
+    await update.message.reply_text(
+        f"🏛️ <b>Synthesizing Institutional Research Memo for ${ticker}...</b>\n"
+        f"<i>Fetching real-time Schwab quotes, technicals, valuation, and running Red Team audit via local Qwen 2.5...</i>",
+        parse_mode="HTML"
+    )
+
+    import asyncio
+    def _fetch_memo():
+        from skills.deep_analysis import generate_institutional_report
+        return generate_institutional_report(ticker)
+
+    try:
+        data = await asyncio.to_thread(_fetch_memo)
+        memo = data.get("memo", "")
+        if not memo:
+            await update.message.reply_text(f"❌ Failed to generate report for {ticker}.")
+            return
+
+        import html
+        memo = html.escape(memo)
+        import re
+        memo = re.sub(r'\*\*(.*?)\*\*', r'<b>\1</b>', memo)
+        memo = re.sub(r'\*(.*?)\*', r'<i>\1</i>', memo)
+
+        if len(memo) > 4000:
+            parts = [memo[i:i+4000] for i in range(0, len(memo), 4000)]
+            for part in parts:
+                await update.message.reply_text(part, parse_mode="HTML")
+        else:
+            await update.message.reply_text(memo, parse_mode="HTML")
+    except Exception as e:
+        await update.message.reply_text(f"❌ Analysis failed: {e}")
+
+
+# ============================================================
+# /redteam <ticker> — Adversarial Risk Officer Audit via Qwen 2.5
+# ============================================================
+async def cmd_redteam(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    if not ctx.args:
+        await update.message.reply_text("⚠️ Please provide a ticker: `/redteam NVDA`", parse_mode="Markdown")
+        return
+    ticker = ctx.args[0].upper().strip().replace("$", "")
+    await update.message.reply_text(
+        f"🛡️ <b>Running Red Team Adversarial Risk Audit for ${ticker}...</b>\n"
+        f"<i>Hunting for bull traps, overhead resistance, and impending binary risks via local Qwen 2.5...</i>",
+        parse_mode="HTML"
+    )
+
+    import asyncio
+    def _run_audit():
+        from skills.deep_analysis import red_team_validate
+        return red_team_validate(ticker)
+
+    try:
+        audit = await asyncio.to_thread(_run_audit)
+        verdict = audit.get("verdict", "CAUTION")
+        risk_score = audit.get("risk_score", 5)
+        raw = audit.get("raw_critique", "")
+
+        v_emoji = "🟢" if verdict == "PASS" else ("🟡" if verdict == "CAUTION" else "🔴")
+        header = f"{v_emoji} <b>RED TEAM AUDIT: ${ticker}</b>\n<b>Verdict:</b> {verdict} | <b>Risk Score:</b> {risk_score}/10\n\n"
+
+        import html
+        raw = html.escape(raw)
+        import re
+        raw = re.sub(r'\*\*(.*?)\*\*', r'<b>\1</b>', raw)
+        raw = re.sub(r'\*(.*?)\*', r'<i>\1</i>', raw)
+
+        msg = header + raw
+        if len(msg) > 4000:
+            msg = msg[:4000]
+        await update.message.reply_text(msg, parse_mode="HTML")
+    except Exception as e:
+        await update.message.reply_text(f"❌ Red Team audit failed: {e}")
+
 # ============================================================
 # LLM Free-Text Chat
 # ============================================================
@@ -387,7 +475,7 @@ async def handle_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("🧠 Thinking...")
 
     try:
-        from llm import ask, build_market_context
+        from llm import ask, build_market_context, earnings_watch_tickers, apply_earnings_guard
     except ImportError:
         await update.message.reply_text(
             "⚠️ LLM module not available. Use /help to see command options."
@@ -417,6 +505,11 @@ async def handle_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         fg        = _api("/market/fear-greed", timeout=10)
         alerts    = _api("/alerts?limit=3", timeout=10)
         opps      = _api("/opportunities?limit=6&session=auto", timeout=20)
+        earnings_tickers = earnings_watch_tickers(
+            portfolio if isinstance(portfolio, dict) else {},
+            extra=sorted(potential_tickers),
+        )
+        earnings = _api("/earnings/calendar?tickers=" + ",".join(earnings_tickers), timeout=30)
         
         # /alerts returns a list directly, not a dict
         alerts_list = alerts if isinstance(alerts, list) else alerts.get("alerts", []) if isinstance(alerts, dict) else []
@@ -428,6 +521,7 @@ async def handle_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             "alerts":         alerts_list,
             "opportunities":  (opps.get("opportunities") or []),
             "user_quotes":    user_quotes,
+            "earnings":       earnings if isinstance(earnings, dict) else {},
         }
 
     api_data = await asyncio.to_thread(fetch_context)
@@ -440,7 +534,8 @@ async def handle_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         f"---\n"
         f"Respond as FinClaw. Be concise (under 300 words). "
         f"Use the live data above to ground your answer. "
-        f"If the question is about a ticker not in the data, say so and give general analysis."
+        f"If the question is about a ticker not in the data, say so and give general analysis. "
+        f"Never say a company reports earnings today unless it is on REPORTING TODAY."
     )
 
     import logging
@@ -449,6 +544,7 @@ async def handle_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     # Run LLM in thread (blocking) so we don't block the event loop
     try:
         response = await asyncio.to_thread(ask, prompt, None, 4096)
+        response = apply_earnings_guard(response, api_data)
         logging.getLogger("telegram_bot").info(f"Gemini responded: {len(response)} chars")
     except Exception as e:
         logging.getLogger("telegram_bot").error(f"Gemini call crashed: {e}")
@@ -456,7 +552,7 @@ async def handle_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
     # Escape HTML tags generated by LLM so Telegram doesn't crash on unclosed `<`
     import html
-    response = html.escape(response)
+    response = html.escape(str(response or "⚠️ No response generated."))
     
     # Convert basic markdown to HTML
     import re
@@ -517,6 +613,10 @@ def main():
     app.add_handler(CommandHandler("movers", cmd_movers))
     app.add_handler(CommandHandler("sectors", cmd_sectors))
     app.add_handler(CommandHandler("news", cmd_news))
+    app.add_handler(CommandHandler("analyze", cmd_analyze))
+    app.add_handler(CommandHandler("a", cmd_analyze))
+    app.add_handler(CommandHandler("redteam", cmd_redteam))
+    app.add_handler(CommandHandler("rt", cmd_redteam))
     app.add_handler(CommandHandler("restart", cmd_restart))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
 

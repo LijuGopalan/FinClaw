@@ -59,7 +59,7 @@ def _send_telegram(message: str):
 
 def run_premarket_brief():
     try:
-        from llm import ask, build_market_context
+        from llm import ask, build_market_context, earnings_watch_tickers, apply_earnings_guard, EARNINGS_TASK_LINE
     except ImportError as e:
         logging.error("Cannot import LLM module: %s", e)
         sys.exit(1)
@@ -72,6 +72,8 @@ def run_premarket_brief():
     fg        = _api_get("/market/fear-greed", timeout=15)
     alerts    = _api_get("/alerts?limit=5", timeout=15)
     opps      = _api_get("/opportunities?limit=8&session=auto", timeout=30)
+    earnings_tickers = earnings_watch_tickers(portfolio if isinstance(portfolio, dict) else {})
+    earnings  = _api_get("/earnings/calendar?tickers=" + ",".join(earnings_tickers), timeout=60)
 
     api_data = {
         "portfolio":      portfolio,
@@ -79,6 +81,7 @@ def run_premarket_brief():
         "fear_greed":     fg,
         "alerts":         (alerts.get("alerts") or []),
         "opportunities":  (opps.get("opportunities") or []),
+        "earnings":       earnings if isinstance(earnings, dict) else {},
     }
 
     context = build_market_context(api_data)
@@ -89,13 +92,14 @@ def run_premarket_brief():
         "2. Key risks for today\n"
         "3. Top 2-3 portfolio holdings to watch today with entry/exit levels\n"
         "4. Fear & Greed interpretation\n"
+        f"{EARNINGS_TASK_LINE}\n"
         "Keep it under 350 words. Format with clear section headers."
     )
 
     prompt = f"{context}\n\n---\nYOUR TASK:\n{task}"
 
     logging.info("Sending prompt to LLM...")
-    response = ask(prompt, max_tokens=1500)
+    response = apply_earnings_guard(ask(prompt, max_tokens=1500), api_data)
 
     header = "🌅 <b>FinClaw Pre-Market Brief</b>"
     message = f"{header}\n\n{response}"

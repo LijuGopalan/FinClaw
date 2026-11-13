@@ -1,12 +1,15 @@
 import os
 import json
+import sys
 import time
 import pandas as pd
 import numpy as np
-import yfinance as yf
 from concurrent.futures import ThreadPoolExecutor
 
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, os.path.join(BASE_DIR, "skills"))
+from financial_skills import get_price_history
+
 DATA_DIR = os.path.join(BASE_DIR, "data")
 UNIVERSE_PATH = os.path.join(DATA_DIR, "universe.json")
 OUTPUT_PATH = os.path.join(DATA_DIR, "ml_dataset.csv")
@@ -28,9 +31,9 @@ def calculate_atr(df, period=14):
 
 def process_ticker(ticker):
     try:
-        # Fetch 60 days of 5m data (max allowed by Yahoo Finance)
-        hist = yf.Ticker(ticker).history(period="60d", interval="5m")
-        if hist.empty or len(hist) < 100:
+        # Use the Schwab-first cascade (Schwab → IBKR → yfinance)
+        hist = get_price_history(ticker, period="1mo", interval="5m")
+        if hist is None or hist.empty or len(hist) < 100:
             return None
             
         hist = hist.dropna()
