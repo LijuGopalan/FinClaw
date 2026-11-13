@@ -1064,7 +1064,8 @@ def build_opportunity_brief(scan_result, max_items=5):
         rows = [r for r in rows if r.get("score", 0) >= 58]
 
     if not rows:
-        return "Scan complete. No high-conviction opportunities found at this time."
+        # Return None instead of a message to suppress noisy "no opportunities" alerts
+        return None
 
     lines = [f"🎯 <b>FinClaw {session.title()} {horizon.title()} Opportunities</b>\n"]
     for item in rows:

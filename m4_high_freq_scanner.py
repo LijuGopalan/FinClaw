@@ -2,23 +2,23 @@ import sys
 import time
 import pandas as pd
 import numpy as np
+import json
+import os
 from concurrent.futures import ThreadPoolExecutor
 
-# A large universe to test M4 limits
-S_AND_P_500 = [
-    "AAPL", "MSFT", "NVDA", "AMZN", "META", "GOOGL", "GOOG", "BRK-B", "TSLA", "LLY",
-    "AVGO", "JPM", "V", "UNH", "XOM", "MA", "PG", "JNJ", "HD", "COST", "MRK",
-    "ABBV", "CVX", "CRM", "AMD", "BAC", "PEP", "LIN", "TMO", "WMT", "MCD", "CSCO",
-    "NFLX", "ADBE", "ABT", "INTC", "QCOM", "TXN", "DHR", "CAT", "PFE", "NOW",
-    "VZ", "CMCSA", "IBM", "DIS", "NKE", "PM", "COP", "RTX", "BA", "HON", "GE",
-    "GS", "UNP", "AMAT", "T", "ISRG", "LOW", "SPGI", "SYK", "MS", "BLK", "PLD",
-    "BKNG", "TJX", "VRTX", "MDT", "PGR", "C", "LRCX", "REGN", "MMC", "ADP", "SCHW",
-    "MDLZ", "GILD", "BSX", "CB", "ADI", "CI", "MU", "PANW", "CVS", "ZTS", "FI",
-    "SNPS", "EQIX", "KLAC", "SLB", "CDNS", "WM", "EOG", "CSX", "SO", "CME", "BDX",
-    "SHW", "ICE", "MO", "ITW", "DUK", "MCK", "NOC", "PH", "AON", "APH", "NXPI",
-    "MAR", "FDX", "CTAS", "PSX", "PYPL", "TDG", "EMR", "ECL", "PXD", "PCAR", "MCO",
-    "FCX", "RSG", "MMM", "ORLY", "O", "MPC", "WELL", "COF", "TRV", "HLT", "ROP"
-]
+def load_watchlist():
+    """Load tickers from universe.json (your personal watchlist)"""
+    universe_path = os.path.join(os.path.dirname(__file__), "data", "universe.json")
+    try:
+        with open(universe_path, 'r') as f:
+            return json.load(f)
+    except Exception as e:
+        print(f"Error loading universe.json: {e}")
+        # Fallback to a minimal set
+        return ["AAPL", "MSFT", "NVDA", "GOOGL", "META", "AMZN", "TSLA", "AMD"]
+
+# Load your personal watchlist instead of SP500
+WATCHLIST = load_watchlist()
 
 def fetch_data(ticker):
     try:
@@ -66,13 +66,13 @@ def fetch_data(ticker):
         return None
 
 def run_high_frequency_scan():
-    print(f"🚀 Starting M4 High-Frequency Scan on {len(S_AND_P_500)} tickers...")
+    print(f"🚀 Starting M4 High-Frequency Scan on {len(WATCHLIST)} tickers from your watchlist...")
     start = time.time()
     
     results = []
     # Utilize M4 efficiently
     with ThreadPoolExecutor(max_workers=30) as executor:
-        for res in executor.map(fetch_data, S_AND_P_500):
+        for res in executor.map(fetch_data, WATCHLIST):
             if res:
                 results.append(res)
                 

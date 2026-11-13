@@ -1,48 +1,76 @@
 import json
 import os
-import urllib.request
-import pandas as pd
-
-def fetch_wiki_table(url, table_index=0, column='Symbol'):
-    try:
-        req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
-        with urllib.request.urlopen(req) as response:
-            html = response.read()
-        tables = pd.read_html(html)
-        return tables[table_index][column].tolist()
-    except Exception as e:
-        print(f"Error fetching {url}: {e}")
-        return []
+import yaml
 
 def build():
+    """
+    Build universe from openclaw.config.yml watchlists instead of fetching SP500.
+    This keeps the tracking focused on your personal watchlist.
+    """
+    # Read watchlists from config
+    config_path = os.path.join(
+        os.path.dirname(__file__), 
+        "openclaw.config.yml"
+    )
+    
     tickers = set()
     
-    # S&P 500
-    sp500 = fetch_wiki_table('https://en.wikipedia.org/wiki/List_of_S%26P_500_companies', 0, 'Symbol')
-    tickers.update(sp500)
-    
-    # Nasdaq 100
-    nasdaq = fetch_wiki_table('https://en.wikipedia.org/wiki/Nasdaq-100', 4, 'Ticker')
-    tickers.update(nasdaq)
-    
-    # Add some popular ETFs and extra tech names
-    fallback = ["SPY", "QQQ", "IWM", "DIA", "SMH", "ARKK", "XLK", "XLF", "XLE", "PLTR", "SOFI", "RIVN", "LCID", "MARA", "RIOT", "COIN", "U", "DKNG", "PTON", "HOOD", "BABA", "JD", "BIDU", "PDD", "NIO", "XPEV", "LI", "MSTR", "CVNA"]
-    tickers.update(fallback)
+    try:
+        with open(config_path, 'r') as f:
+            config = yaml.safe_load(f)
+            
+        # Extract all tickers from monitoring.watchlists
+        watchlists = config.get('monitoring', {}).get('watchlists', {})
+        
+        for category, ticker_list in watchlists.items():
+            if ticker_list:
+                tickers.update(ticker_list)
+                print(f"Added {len(ticker_list)} tickers from {category}")
+        
+        # Also add portfolio holdings if they exist
+        portfolio_path = os.path.join(
+            os.path.dirname(__file__),
+            "data",
+            "portfolio.json"
+        )
+        if os.path.exists(portfolio_path):
+            try:
+                with open(portfolio_path, 'r') as f:
+                    portfolio = json.load(f)
+                holdings = portfolio.get('holdings', [])
+                for holding in holdings:
+                    ticker = holding.get('ticker')
+                    if ticker:
+                        tickers.add(ticker)
+                print(f"Added {len(holdings)} tickers from portfolio")
+            except Exception as e:
+                print(f"Could not read portfolio: {e}")
+                
+    except Exception as e:
+        print(f"Error reading config: {e}")
+        # Fallback to a minimal set if config fails
+        tickers = {"AAPL", "MSFT", "NVDA", "GOOGL"}
 
-    # Clean tickers
-    clean_tickers = []
-    for t in tickers:
-        if isinstance(t, str) and len(t) <= 5:
-            clean_tickers.append(t.replace('.', '-').strip().upper())
+    # Clean and sort tickers
+    clean_tickers = sorted([
+        t.replace('.', '-').strip().upper() 
+        for t in tickers 
+        if isinstance(t, str) and t.strip()
+    ])
 
-    data_dir = "/Users/adgroup/.gemini/antigravity/scratch/openclaw-financial-assistant/data"
+    # Write to universe.json
+    data_dir = os.path.join(
+        os.path.dirname(__file__),
+        "data"
+    )
     os.makedirs(data_dir, exist_ok=True)
     out_file = os.path.join(data_dir, "universe.json")
     
     with open(out_file, "w") as f:
-        json.dump(clean_tickers, f)
+        json.dump(clean_tickers, f, indent=2)
         
-    print(f"Saved {len(clean_tickers)} tickers to {out_file}")
+    print(f"\n✅ Saved {len(clean_tickers)} tickers to {out_file}")
+    print(f"Tickers: {', '.join(clean_tickers[:10])}{'...' if len(clean_tickers) > 10 else ''}")
 
 if __name__ == "__main__":
     build()
