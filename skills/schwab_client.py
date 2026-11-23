@@ -58,21 +58,37 @@ def _extract_change_pct(quote: dict):
             pass
     return None
 
+def _normalize_ticker(ticker: str) -> str:
+    """Schwab uses '$VIX' for the CBOE Volatility Index instead of 'VIX' or '^VIX'.
+    Non-equity symbols (crypto, futures, Yahoo index symbols) are skipped."""
+    sym = str(ticker).strip().upper()
+    if sym in ("VIX", "^VIX"):
+        return "$VIX"
+    if sym.startswith("^") or "=" in sym or "-USD" in sym:
+        return None
+    return sym
+
 def get_quote(ticker: str) -> dict:
+    global _client, _schwab_available
     if not schwab_available():
         return None
         
+    schwab_sym = _normalize_ticker(ticker)
+    if not schwab_sym:
+        return None
+    if not schwab_sym:
+        return None
     try:
-        r = _client.get_quote(ticker)
+        r = _client.get_quote(schwab_sym)
         r.raise_for_status()
         data = r.json()
         
         # schwab-py returns a dict where the key is the ticker
-        if ticker not in data:
+        if schwab_sym not in data:
             return None
             
-        quote = data[ticker].get("quote", {})
-        reference = data[ticker].get("reference", {})
+        quote = data[schwab_sym].get("quote", {})
+        reference = data[schwab_sym].get("reference", {})
         
         return {
             "ticker": ticker,
@@ -91,23 +107,33 @@ def get_quote(ticker: str) -> dict:
         }
     except Exception as e:
         logger.error(f"Schwab get_quote error for {ticker}: {e}")
+        err_str = str(e).lower()
+        if "invalid_client" in err_str or "invalid_grant" in err_str or "unauthorized" in err_str:
+            _client = None
+            _schwab_available = False
         return None
 
 def get_quotes_batch(tickers: list) -> dict:
+    global _client, _schwab_available
     if not schwab_available():
         return {}
         
+    schwab_tickers = [sym for t in tickers if (sym := _normalize_ticker(t))]
+    if not schwab_tickers:
+        return {}
+    sym_map = {sym: t for t in tickers if (sym := _normalize_ticker(t))}
     results = {}
     try:
         # Client handles multiple tickers as a list or comma-separated string
-        r = _client.get_quotes(tickers)
+        r = _client.get_quotes(schwab_tickers)
         r.raise_for_status()
         data = r.json()
         
         for t, t_data in data.items():
+            orig_t = sym_map.get(t, t)
             quote = t_data.get("quote", {})
-            results[t] = {
-                "ticker": t,
+            results[orig_t] = {
+                "ticker": orig_t,
                 "price": quote.get("lastPrice"),
                 "change_pct": _extract_change_pct(quote),
                 "volume": quote.get("totalVolume")
@@ -115,6 +141,10 @@ def get_quotes_batch(tickers: list) -> dict:
         return results
     except Exception as e:
         logger.error(f"Schwab get_quotes_batch error: {e}")
+        err_str = str(e).lower()
+        if "invalid_client" in err_str or "invalid_grant" in err_str or "unauthorized" in err_str:
+            _client = None
+            _schwab_available = False
         return {}
 
 def get_price_history(ticker: str, period: str = "1y", interval: str = "1d"):
@@ -123,24 +153,28 @@ def get_price_history(ticker: str, period: str = "1y", interval: str = "1d"):
     interval: 1m, 5m, 15m, 30m, 1d, 1wk
     Returns a list of dicts: {"time": ..., "open": ..., "high": ..., "low": ..., "close": ..., "volume": ...}
     """
+    global _client, _schwab_available
     if not schwab_available():
         return None
         
+    schwab_sym = _normalize_ticker(ticker)
+    if not schwab_sym:
+        return None
     try:
         import schwab
         
         if interval == "1m":
-            r = _client.get_price_history_every_minute(ticker)
+            r = _client.get_price_history_every_minute(schwab_sym)
         elif interval == "5m":
-            r = _client.get_price_history_every_five_minutes(ticker)
+            r = _client.get_price_history_every_five_minutes(schwab_sym)
         elif interval == "15m":
-            r = _client.get_price_history_every_fifteen_minutes(ticker)
+            r = _client.get_price_history_every_fifteen_minutes(schwab_sym)
         elif interval == "30m":
-            r = _client.get_price_history_every_thirty_minutes(ticker)
+            r = _client.get_price_history_every_thirty_minutes(schwab_sym)
         elif interval in ["1wk", "1w"]:
-            r = _client.get_price_history_every_week(ticker)
+            r = _client.get_price_history_every_week(schwab_sym)
         else: # default to 1d
-            r = _client.get_price_history_every_day(ticker)
+            r = _client.get_price_history_every_day(schwab_sym)
 
         r.raise_for_status()
         data = r.json()

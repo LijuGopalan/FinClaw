@@ -87,6 +87,7 @@ async def cmd_help(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         "/analyze &lt;ticker&gt; — Institutional Deep-Dive Research Memo (via Qwen 2.5)\n"
         "/redteam &lt;ticker&gt; — Adversarial Risk Audit to catch bull traps (via Qwen 2.5)\n\n"
         "📈 <b>Market & Screener Scans:</b>\n"
+        "/opps — Top algorithmic trade opportunities (Schwab live prices & levels)\n"
         "/scan — Run an intraday scalp scan now\n"
         "/delivery — Run delivery volume confluence scan now\n"
         "/portfolio — Your portfolio P&amp;L summary\n"
@@ -461,13 +462,36 @@ async def cmd_redteam(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"❌ Red Team audit failed: {e}")
 
 # ============================================================
+# /opportunities (or /opps /recommendations)
+# ============================================================
+async def cmd_opportunities(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("🎯 <b>Scanning for algorithmic setups (Schwab live data)...</b>", parse_mode="HTML")
+    opps = _api("/opportunities?limit=5&session=auto", timeout=45)
+    if not opps or opps.get("error"):
+        await update.message.reply_text(f"❌ Failed to fetch opportunities: {opps.get('error', 'API unavailable')}")
+        return
+
+    from skills.opportunity_engine import build_opportunity_brief
+    brief = build_opportunity_brief(opps, max_items=5)
+    if not brief:
+        await update.message.reply_text(
+            "📭 <b>No High-Conviction Opportunities Found</b>\n\n"
+            "None of the scanned tickers currently meet the breakout/momentum threshold (score ≥ 58).\n"
+            "<i>Market scanner is active — you will receive an alert as soon as a setup qualifies.</i>",
+            parse_mode="HTML"
+        )
+        return
+
+    await update.message.reply_text(brief, parse_mode="HTML")
+
+# ============================================================
 # LLM Free-Text Chat
 # ============================================================
 import sys as _sys
 _sys.path.insert(0, os.path.join(os.path.dirname(__file__), "skills"))
 
 async def handle_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    """Route all plain-text messages through Gemini Flash with live market context."""
+    """Route all plain-text messages through Gemini Flash or Qwen with live market context."""
     text = update.message.text or ""
     if not text.strip():
         return
@@ -504,7 +528,7 @@ async def handle_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         movers    = _api("/market/movers", timeout=20)
         fg        = _api("/market/fear-greed", timeout=10)
         alerts    = _api("/alerts?limit=3", timeout=10)
-        opps      = _api("/opportunities?limit=6&session=auto", timeout=20)
+        opps      = _api("/opportunities?limit=6&session=auto", timeout=35)
         earnings_tickers = earnings_watch_tickers(
             portfolio if isinstance(portfolio, dict) else {},
             extra=sorted(potential_tickers),
@@ -519,7 +543,7 @@ async def handle_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             "market_indices": (movers.get("market_indices") or {}),
             "fear_greed":     fg,
             "alerts":         alerts_list,
-            "opportunities":  (opps.get("opportunities") or []),
+            "opportunities":  (opps.get("opportunities") or []) if isinstance(opps, dict) else [],
             "user_quotes":    user_quotes,
             "earnings":       earnings if isinstance(earnings, dict) else {},
         }
@@ -532,10 +556,13 @@ async def handle_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         f"---\n"
         f"USER MESSAGE: {text}\n"
         f"---\n"
-        f"Respond as FinClaw. Be concise (under 300 words). "
-        f"Use the live data above to ground your answer. "
-        f"If the question is about a ticker not in the data, say so and give general analysis. "
-        f"Never say a company reports earnings today unless it is on REPORTING TODAY."
+        f"Respond as FinClaw. Be concise (under 300 words).\n"
+        f"CRITICAL GROUNDING RULES:\n"
+        f"1. You MUST ONLY cite real-time stock prices, entry zones, targets, and stops explicitly listed in LIVE MARKET DATA above.\n"
+        f"2. NEVER invent, fabricate, or recall price levels from pre-training memory (e.g. do not guess AAPL, TSLA, or NFLX prices from memory).\n"
+        f"3. If the user asks for trade ideas, recommendations, or setups and TOP OPPORTUNITIES has no active setups, tell the user clearly: 'No algorithmic setups currently qualify under current market conditions.' NEVER fabricate trade setups.\n"
+        f"4. Never say a company reports earnings today unless it is explicitly on REPORTING TODAY in the earnings calendar above.\n"
+        f"5. Distinguish strictly between Today's Change (%) and All-Time P&L (%)."
     )
 
     import logging
@@ -607,6 +634,9 @@ def main():
     app.add_handler(CommandHandler("portfolio", cmd_portfolio))
     app.add_handler(CommandHandler("alerts", cmd_alerts))
     app.add_handler(CommandHandler("scan", cmd_scan))
+    app.add_handler(CommandHandler("opportunities", cmd_opportunities))
+    app.add_handler(CommandHandler("opps", cmd_opportunities))
+    app.add_handler(CommandHandler("recommendations", cmd_opportunities))
     app.add_handler(CommandHandler("delivery", cmd_delivery))
     app.add_handler(CommandHandler("insiders", cmd_insiders))
     app.add_handler(CommandHandler("feargreed", cmd_feargreed))

@@ -1022,8 +1022,8 @@ def get_opportunities(
         except Exception as e:
             return {"error": str(e), "ticker": ticker}
 
-    # Leverage M4 parallelism (max 40 workers to avoid api bans while keeping high throughput)
-    with ThreadPoolExecutor(max_workers=40) as executor:
+    # Parallelism with bounded concurrency (max 6 workers to stay well under Schwab/Akamai rate limits)
+    with ThreadPoolExecutor(max_workers=6) as executor:
         for result in executor.map(_score_worker, universe):
             if result.get("error"):
                 errors.append({"ticker": result.get("ticker"), "error": result["error"]})

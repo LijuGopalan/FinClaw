@@ -151,17 +151,23 @@ def main():
             env_path = os.path.join(os.path.dirname(__file__), ".env")
             if fresh_refresh and os.path.exists(env_path):
                 with open(env_path, "r") as ef:
-                    content = ef.read()
-                import re
-                if "SCHWAB_REFRESH_TOKEN=" in content:
-                    content = re.sub(r"#?\s*SCHWAB_REFRESH_TOKEN=.*", f"SCHWAB_REFRESH_TOKEN={fresh_refresh}", content)
-                else:
-                    content += f"\nSCHWAB_REFRESH_TOKEN={fresh_refresh}\n"
+                    lines = ef.read().splitlines()
+                found = False
+                new_lines = []
+                for line in lines:
+                    stripped = line.strip()
+                    if stripped.startswith("SCHWAB_REFRESH_TOKEN=") or stripped.startswith("# SCHWAB_REFRESH_TOKEN="):
+                        new_lines.append(f"SCHWAB_REFRESH_TOKEN={fresh_refresh}")
+                        found = True
+                    else:
+                        new_lines.append(line)
+                if not found:
+                    new_lines.append(f"SCHWAB_REFRESH_TOKEN={fresh_refresh}")
                 with open(env_path, "w") as ef:
-                    ef.write(content)
+                    ef.write("\n".join(new_lines) + "\n")
                 print("✅ Synchronized fresh SCHWAB_REFRESH_TOKEN into .env")
-        except Exception:
-            pass
+        except Exception as e:
+            print(f"⚠️ Failed to update .env: {e}")
 
         print("\nAll done! FinClaw is ready to stream Charles Schwab live data.")
 

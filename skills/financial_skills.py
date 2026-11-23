@@ -61,20 +61,21 @@ try:
 except Exception:
     pass
 
-_original_yf_ticker = yf.Ticker
-_yf_ticker_objects: dict = {}
+if not getattr(yf, "_finclaw_patched", False):
+    _original_yf_ticker = yf.Ticker
+    _yf_ticker_objects: dict = {}
 
-def _cached_yf_ticker(ticker, *args, **kwargs):
-    """Return a cached Ticker that reuses the shared session, eliminating
-    per-ticker fd leaks from repeated instantiation."""
-    t_upper = str(ticker).upper()
-    if t_upper not in _yf_ticker_objects:
-        obj = _original_yf_ticker.__new__(_original_yf_ticker)
-        _original_yf_ticker.__init__(obj, ticker, session=_yf_session)
-        _yf_ticker_objects[t_upper] = obj
-    return _yf_ticker_objects[t_upper]
+    def _cached_yf_ticker(ticker, *args, **kwargs):
+        """Return a cached Ticker that reuses the shared session, eliminating
+        per-ticker fd leaks from repeated instantiation."""
+        t_upper = str(ticker).upper()
+        if t_upper not in _yf_ticker_objects:
+            kwargs.setdefault("session", _yf_session)
+            _yf_ticker_objects[t_upper] = _original_yf_ticker(ticker, *args, **kwargs)
+        return _yf_ticker_objects[t_upper]
 
-yf.Ticker = _cached_yf_ticker
+    yf.Ticker = _cached_yf_ticker
+    yf._finclaw_patched = True
 from datetime import datetime, timedelta
 from dotenv import load_dotenv
 from functools import wraps
@@ -798,7 +799,27 @@ def get_portfolio() -> dict:
             sector = h.get("sector", "Other")
 
             q = get_stock_quote(ticker)
-            current_price = q.get("price") or 0
+            current_price = q.get("price") if (q and q.get("price")) else None
+            change_today = q.get("change_pct") if q else None
+
+            # Fallback if primary quote failed (e.g. rate limit): try price history
+            if not current_price or current_price <= 0:
+                try:
+                    df_fallback = get_price_history(ticker, period="5d", interval="1d")
+                    if df_fallback is not None and not df_fallback.empty and "Close" in df_fallback.columns:
+                        closes = df_fallback["Close"].dropna()
+                        if not closes.empty:
+                            current_price = float(closes.iloc[-1])
+                            if len(closes) > 1:
+                                prev = float(closes.iloc[-2])
+                                change_today = ((current_price - prev) / prev) * 100 if prev else None
+                except Exception:
+                    pass
+
+            # Last resort: if still no price, use avg_cost so portfolio doesn't show -100% loss
+            if not current_price or current_price <= 0:
+                current_price = avg_cost
+
             current_value = shares * current_price
             cost_basis    = shares * avg_cost
             gain_loss     = current_value - cost_basis
@@ -817,7 +838,7 @@ def get_portfolio() -> dict:
                 "cost_basis":    round(cost_basis, 2),
                 "gain_loss":     round(gain_loss, 2),
                 "gain_loss_pct": round(gain_loss_pct, 2),
-                "change_today":  q.get("change_pct"),
+                "change_today":  round(change_today, 2) if change_today is not None else None,
                 "weight_pct":    0  # calculated below
             })
 

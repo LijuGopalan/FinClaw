@@ -300,13 +300,13 @@ def _sentence_claims_earnings_today(sentence: str, reporting: set, known: set) -
     return True
 
 
-def _ask_local_qwen(prompt: str, system: str, max_tokens: int) -> str | None:
+def _ask_local_qwen(prompt: str, system: str, max_tokens: int):
     """Query local Qwen 2.5 model via Ollama running on Apple Silicon."""
     if not USE_LOCAL_LLM:
         return None
     try:
-        # Cap local model predict tokens to 2048 for snappy local inference
-        local_predict = min(max_tokens, 2048) if max_tokens else 1024
+        # Increase token limit to 4096 for market briefs and research reports
+        local_predict = min(max_tokens, 4096) if max_tokens else 2048
         payload = {
             "model": LOCAL_LLM_MODEL,
             "messages": [
@@ -335,7 +335,7 @@ def _ask_local_qwen(prompt: str, system: str, max_tokens: int) -> str | None:
     return None
 
 
-def _extract_gemini_text(response) -> str | None:
+def _extract_gemini_text(response):
     """
     Safely extract text from a Gemini response object.
 
@@ -492,12 +492,36 @@ def build_market_context(api_data: dict) -> str:
     # Top opportunities
     opps = api_data.get("opportunities", [])
     if opps:
-        lines.append("\nTOP OPPORTUNITIES (algorithmic scan):")
+        lines.append("\nTOP OPPORTUNITIES (Live algorithmic scan from Charles Schwab):")
         for o in opps[:5]:
+            t = o.get("ticker", "")
+            sc = o.get("score", 0)
+            act = o.get("action", "")
+            pr = o.get("price", 0)
+            el = o.get("entry_low")
+            eh = o.get("entry_high")
+            tp = o.get("target_price")
+            sl = o.get("stop_loss")
+            rr = o.get("risk_reward")
+            th = o.get("thesis", "")
+            
+            entry_str = f"${el:.2f}–${eh:.2f}" if el and eh else "Market"
+            target_str = f"${tp:.2f}" if tp else "N/A"
+            stop_str = f"${sl:.2f}" if sl else "N/A"
+            rr_str = f"R/R: {rr}:1" if rr is not None else ""
+            
             lines.append(
-                f"  {o.get('ticker'):6s} | Score: {o.get('score')} | "
-                f"Action: {o.get('action')} | ${o.get('price', 0):.2f}"
+                f"  Ticker: ${t} | Action: {act} | Score: {sc} | Current Price: ${pr:.2f} | "
+                f"Entry Zone: {entry_str} | Target: {target_str} | Stop-Loss: {stop_str} | {rr_str}"
             )
+            if th:
+                lines.append(f"    Thesis: {th}")
+    else:
+        lines.append(
+            "\nTOP OPPORTUNITIES:\n"
+            "  None currently flagged by the algorithmic scan.\n"
+            "  CRITICAL RULE: DO NOT invent trade setups or make up fake stock prices. State clearly that no setups qualify right now."
+        )
 
     # Latest alerts
     alerts = api_data.get("alerts", [])

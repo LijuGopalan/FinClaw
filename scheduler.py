@@ -1,15 +1,39 @@
 """
 FinClaw Scheduler — Algorithmic + LLM-Powered Market Intelligence
 =================================================================
-Two layers run in parallel every market day:
+ENHANCED 24/7 QWEN UTILIZATION:
 
-  ALGORITHMIC (zero cost, always on):
-  - 08:30–16:00 CST  Every 15 min  Intraday scalp scan  (server.py math engine)
+  PRE-MARKET (2:00-9:00 AM CST):
+  - 02:00  Overnight news digest (Qwen)
+  - 03:00  Earnings preview (Qwen)
+  - 06:00  Pre-market catalyst scan (Qwen)
+  - 08:15  Pre-market LLM brief (Qwen)
 
-  LLM-POWERED (Gemini Flash, ~$0.003/day):
-  - 08:15 CST  Pre-market LLM brief
-  - 12:00 CST  Midday LLM swing analysis
-  - 16:05 CST  Close summary + portfolio review
+  MARKET HOURS (9:00-4:00 PM CST):
+  - Every 15 min  Intraday scalp scan (algorithmic)
+  - Every 15 min  News sentiment analysis (Qwen)
+  - 10:00  Delivery volume confluence scan
+  - 12:00  Midday LLM update (Qwen)
+  - 14:00  Delivery volume confluence scan
+
+  AFTER-HOURS (4:00-8:00 PM CST):
+  - 16:05  Close summary LLM brief (Qwen)
+  - 16:30  Daily trade journal & performance review (Qwen)
+  - Every 30 min  After-hours monitoring (Qwen)
+  - 18:00  Smart money tracker (Congress, insiders, ARK)
+
+  CONTINUOUS (Every 4 hours, 24/7):
+  - Volatility regime detection & strategy adjustment (Qwen)
+
+  WEEKENDS (Markets Closed):
+  - Saturday 09:00  Weekend deep research (all 37 stocks, Qwen)
+  - Saturday 14:00  Portfolio rebalancing analysis (Qwen)
+  - Saturday 23:00  ML model retraining (MLX)
+  - Sunday 10:00   Week-ahead macro preview (Qwen)
+  - Sunday 15:00   Weekly trading plan (Qwen)
+  - Sunday 16:00   Weekly performance review (Qwen)
+
+ALL LLM OPERATIONS NOW USE LOCAL QWEN 2.5 (ZERO COST, 100% PRIVATE)
 """
 
 import os
@@ -36,6 +60,20 @@ API_BASE = "http://localhost:5055/api"
 
 # Add skills/ to path so we can import llm.py
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "skills"))
+
+# Import new 24/7 monitoring functions
+from overnight_monitor import overnight_news_digest, premarket_catalyst_scan, afterhours_monitoring
+from weekend_research import weekend_deep_research_batch, weekly_trading_plan
+from news_sentiment import get_sentiment_alerts
+
+# Import advanced features
+from smart_money_tracker import generate_smart_money_report
+from trade_journal import generate_daily_journal, generate_weekly_performance_review
+from volatility_regime import detect_volatility_regime
+
+# Import ML retraining
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "ml_pipeline"))
+from auto_retrain import run_weekly_retrain, generate_retrain_report
 
 
 # ── Helpers ─────────────────────────────────────────────────────────────────
@@ -162,6 +200,7 @@ def trigger_llm_brief(brief_type: str):
                 "4. Fear & Greed interpretation\n"
                 f"{EARNINGS_TASK_LINE}\n"
                 "Note: Distinguish strictly between Today's Change (%) and All-Time P&L (%). Do not invent stop losses if none are set.\n"
+                "CRITICAL: Ground all prices, setups, and ideas strictly in the data above. NEVER invent tickers, price levels, or stop-losses from memory.\n"
                 "Keep it under 350 words. Format with clear section headers."
             )
         elif brief_type == "midday":
@@ -169,8 +208,9 @@ def trigger_llm_brief(brief_type: str):
                 "It is midday (12:00 PM CST). Write a concise midday market update covering:\n"
                 "1. How the morning session went (indices, sentiment)\n"
                 "2. Portfolio holdings today (use 'Today' change %, DO NOT confuse with all-time total P&L)\n"
-                "3. Top 1-2 afternoon scalp or swing setups from the opportunity scan\n"
+                "3. Top 1-2 afternoon scalp or swing setups from the opportunity scan (if none, state 'No setups flagged')\n"
                 "4. Any action needed (hold, trail stop, add, trim)\n"
+                "CRITICAL: Ground all prices strictly in the data above. NEVER cite prices from pre-training memory.\n"
                 "Keep it under 300 words.\n"
                 f"{EARNINGS_TASK_LINE}"
             )
@@ -179,9 +219,10 @@ def trigger_llm_brief(brief_type: str):
                 "Market is closed (4:05 PM CST). Write an end-of-day portfolio review:\n"
                 "1. How the portfolio performed TODAY (use 'Today' change %, DO NOT report all-time loss as today's loss!)\n"
                 "2. Any positions near stop-loss (if no stops are set in data, explicitly state 'No stop-loss configured')\n"
-                "3. Top 2 overnight/next-day watchlist ideas from the scan\n"
+                "3. Top 2 overnight/next-day watchlist ideas from the scan (if none, state 'No setups flagged')\n"
                 "4. One-sentence macro read for tomorrow\n"
                 "5. Rebalancing suggestion if any position exceeds 10% concentration\n"
+                "CRITICAL: Ground all prices strictly in the data above. NEVER cite prices from pre-training memory.\n"
                 "Keep it under 350 words.\n"
                 f"{EARNINGS_TASK_LINE}"
             )
@@ -213,23 +254,59 @@ def trigger_llm_brief(brief_type: str):
 
 # ── Main scheduler loop ──────────────────────────────────────────────────────
 def run_scheduler():
-    logging.info("Starting FinClaw Scheduler Daemon (Algorithmic + LLM)...")
+    logging.info("Starting FinClaw Scheduler Daemon (24/7 Qwen-Powered Intelligence)...")
 
     last_intraday        = None
+    last_sentiment       = None
     last_premarket_day   = None
     last_midday_day      = None
     last_close_day       = None
     last_delivery_10_day = None
     last_delivery_14_day = None
+    last_afterhours      = None
+    last_overnight_news  = None
+    last_earnings_preview = None
+    last_premarket_catalyst = None
+    last_weekend_research = None
+    last_trading_plan = None
+    last_ml_retrain = None
+    last_smart_money = None
+    last_daily_journal = None
+    last_weekly_review = None
+    last_volatility_check = None
 
     while True:
         # Enforce CST timezone for all scheduling logic
         cst_tz = pytz.timezone('America/Chicago')
         now = datetime.now(cst_tz)
 
+        # ── OVERNIGHT INTELLIGENCE (2:00-7:00 AM) ──────────────────────────
+        # Run 7 days a week
+        today_str = now.strftime("%Y-%m-%d")
+        
+        # 02:00 CST — Overnight News Digest
+        if now.hour == 2 and now.minute == 0 and last_overnight_news != today_str:
+            try:
+                digest = overnight_news_digest()
+                if digest:
+                    _send_telegram(f"🌙 <b>Overnight News Digest</b>\n\n{digest}")
+                last_overnight_news = today_str
+            except Exception as e:
+                logging.error(f"Overnight news digest failed: {e}")
+        
+        # 06:00 CST — Pre-Market Catalyst Scan
+        if now.hour == 6 and now.minute == 0 and last_premarket_catalyst != today_str:
+            try:
+                catalyst_report = premarket_catalyst_scan()
+                if catalyst_report:
+                    _send_telegram(f"⚡ <b>Pre-Market Catalysts</b>\n\n{catalyst_report}")
+                last_premarket_catalyst = today_str
+            except Exception as e:
+                logging.error(f"Pre-market catalyst scan failed: {e}")
+
+        # ── WEEKDAY MARKET OPERATIONS ──────────────────────────────────────
         # Only run on weekdays (Mon=0 … Fri=4)
         if now.weekday() <= 4:
-            today_str = now.strftime("%Y-%m-%d")
 
             # ── 08:15 CST — Pre-market LLM brief ──────────────────────────
             if now.hour == 8 and now.minute == 15 and last_premarket_day != today_str:
@@ -244,6 +321,16 @@ def run_scheduler():
                         if last_intraday != minute_key:
                             trigger_scan("regular", "scalp")
                             last_intraday = minute_key
+                        
+                        # News sentiment analysis (every 15 min during market hours)
+                        if last_sentiment != minute_key:
+                            try:
+                                sentiment_alert = get_sentiment_alerts()
+                                if sentiment_alert:
+                                    _send_telegram(sentiment_alert)
+                                last_sentiment = minute_key
+                            except Exception as e:
+                                logging.error(f"Sentiment scan failed: {e}")
 
             # ── 10:00 CST — Delivery Volume Confluence Check ────────────────
             if now.hour == 10 and now.minute == 0 and last_delivery_10_day != today_str:
@@ -264,6 +351,98 @@ def run_scheduler():
             if now.hour == 16 and now.minute == 5 and last_close_day != today_str:
                 trigger_llm_brief("close")
                 last_close_day = today_str
+            
+            # ── 16:30 CST — Daily Trade Journal ───────────────────────────
+            if now.hour == 16 and now.minute == 30 and last_daily_journal != today_str:
+                try:
+                    journal = generate_daily_journal()
+                    if journal:
+                        _send_telegram(f"📓 <b>Daily Trade Journal</b>\n\n{journal}")
+                    last_daily_journal = today_str
+                except Exception as e:
+                    logging.error(f"Daily journal failed: {e}")
+            
+            # ── 18:00 CST — Smart Money Tracker ───────────────────────────
+            if now.hour == 18 and now.minute == 0 and last_smart_money != today_str:
+                try:
+                    smart_money = generate_smart_money_report()
+                    if smart_money:
+                        _send_telegram(f"💰 <b>Smart Money Report</b>\n\n{smart_money}")
+                    last_smart_money = today_str
+                except Exception as e:
+                    logging.error(f"Smart money tracker failed: {e}")
+
+        # ── AFTER-HOURS MONITORING (4:00-8:00 PM, weekdays) ─────────────────
+        if now.weekday() <= 4 and 16 <= now.hour < 20:
+            if now.minute % 30 == 0:
+                minute_key = f"{now.hour}:{now.minute}"
+                if last_afterhours != minute_key:
+                    try:
+                        ah_alert = afterhours_monitoring()
+                        if ah_alert:
+                            _send_telegram(f"🌆 <b>After-Hours Alert</b>\n\n{ah_alert}")
+                        last_afterhours = minute_key
+                    except Exception as e:
+                        logging.error(f"After-hours monitoring failed: {e}")
+
+        # ── WEEKEND INTELLIGENCE ─────────────────────────────────────────────
+        # Saturday operations
+        if now.weekday() == 5:  # Saturday
+            # 09:00 — Weekend Deep Research (all watchlist stocks)
+            if now.hour == 9 and now.minute == 0 and last_weekend_research != today_str:
+                try:
+                    research_summary = weekend_deep_research_batch()
+                    if research_summary:
+                        _send_telegram(f"📊 <b>Weekend Research Complete</b>\n\n{research_summary}")
+                    last_weekend_research = today_str
+                except Exception as e:
+                    logging.error(f"Weekend research failed: {e}")
+            
+            # 23:00 — Weekly ML Model Retraining
+            if now.hour == 23 and now.minute == 0 and last_ml_retrain != today_str:
+                try:
+                    logging.info("Starting weekly ML model retraining...")
+                    results = run_weekly_retrain()
+                    report = generate_retrain_report(results)
+                    _send_telegram(report)
+                    last_ml_retrain = today_str
+                except Exception as e:
+                    logging.error(f"ML retraining failed: {e}")
+                    _send_telegram(f"⚠️ ML Model Retraining Failed\n\nError: {str(e)}")
+
+        # Sunday operations
+        if now.weekday() == 6:  # Sunday
+            # 15:00 — Weekly Trading Plan
+            if now.hour == 15 and now.minute == 0 and last_trading_plan != today_str:
+                try:
+                    plan = weekly_trading_plan()
+                    if plan:
+                        _send_telegram(f"📋 <b>Weekly Trading Plan</b>\n\n{plan}")
+                    last_trading_plan = today_str
+                except Exception as e:
+                    logging.error(f"Weekly trading plan failed: {e}")
+            
+            # 16:00 — Weekly Performance Review
+            if now.hour == 16 and now.minute == 0 and last_weekly_review != today_str:
+                try:
+                    review = generate_weekly_performance_review()
+                    if review:
+                        _send_telegram(f"📊 <b>Weekly Performance Review</b>\n\n{review}")
+                    last_weekly_review = today_str
+                except Exception as e:
+                    logging.error(f"Weekly review failed: {e}")
+
+        # ── VOLATILITY REGIME DETECTION (Every 4 hours, 24/7) ────────────
+        if now.hour % 4 == 0 and now.minute == 0:
+            hour_key = f"{now.hour}"
+            if last_volatility_check != hour_key:
+                try:
+                    regime_alert = detect_volatility_regime()
+                    if regime_alert:
+                        _send_telegram(regime_alert)
+                    last_volatility_check = hour_key
+                except Exception as e:
+                    logging.error(f"Volatility regime detection failed: {e}")
 
         time.sleep(30)  # Heartbeat — check every 30 seconds
 
