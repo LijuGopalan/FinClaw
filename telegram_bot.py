@@ -86,9 +86,13 @@ async def cmd_help(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         "🧠 <b>AI & Institutional Research:</b>\n"
         "/analyze &lt;ticker&gt; — Institutional Deep-Dive Research Memo (via Qwen 2.5)\n"
         "/redteam &lt;ticker&gt; — Adversarial Risk Audit to catch bull traps (via Qwen 2.5)\n\n"
+        "🚨 <b>Market Regime & Risk:</b>\n"
+        "/regime — 🔥 Check market regime & get SELL/HOLD/BUY verdict\n"
+        "         <i>Detects corrections, tells you when to go to cash!</i>\n\n"
         "📈 <b>Market & Screener Scans:</b>\n"
+        "/scan — 🔥 Enhanced scan with automatic /analyze + /redteam validation\n"
+        "        <i>Alerts ONLY for confirmed buy signals that pass red team review!</i>\n"
         "/opps — Top algorithmic trade opportunities (Schwab live prices & levels)\n"
-        "/scan — Run an intraday scalp scan now\n"
         "/delivery — Run delivery volume confluence scan now\n"
         "/portfolio — Your portfolio P&amp;L summary\n"
         "/alerts — Last 5 market alerts\n"
@@ -99,7 +103,11 @@ async def cmd_help(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         "/sectors — Show sector rotation performance\n"
         "/news &lt;ticker&gt; — Show latest news for a ticker\n"
         "/restart — Hard restart all FinClaw background daemons\n"
-        "/help — This message",
+        "/help — This message\n\n"
+        "<b>🔥 NEW FEATURES:</b>\n"
+        "• /regime — Market regime detection (tells you when to SELL!)\n"
+        "• /scan — Auto /analyze + /redteam (only alerts confirmed buys)\n\n"
+        "<i>💡 Use /regime daily to stay ahead of market corrections!</i>",
         parse_mode="HTML",
     )
 
@@ -208,25 +216,96 @@ async def cmd_alerts(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 
 # ============================================================
+# /regime - Check Market Regime
+# ============================================================
+async def cmd_regime(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(
+        "🔍 <b>Analyzing Market Regime...</b>\n\n"
+        "🤖 Checking:\n"
+        "  • Market indices vs moving averages\n"
+        "  • VIX fear gauge\n"
+        "  • Market breadth\n"
+        "  • Your portfolio health\n\n"
+        "<i>This takes 30-60 seconds...</i>",
+        parse_mode="HTML"
+    )
+    
+    import asyncio
+    
+    def _check_regime():
+        import json
+        from skills.market_regime_detector import check_market_regime_and_alert, format_regime_report
+        
+        # Load watchlist
+        with open("data/universe.json") as f:
+            watchlist = json.load(f)
+        
+        # Get portfolio drawdown
+        portfolio_dd = 0
+        try:
+            portfolio = _api("/portfolio")
+            if portfolio and "summary" in portfolio:
+                portfolio_dd = portfolio["summary"].get("total_return_pct", 0)
+        except Exception:
+            pass
+        
+        # Check regime (don't auto-alert, we'll format it ourselves)
+        result = check_market_regime_and_alert(
+            watchlist,
+            portfolio_drawdown=portfolio_dd,
+            send_alert=False
+        )
+        
+        return format_regime_report(result)
+    
+    try:
+        report = await asyncio.to_thread(_check_regime)
+        
+        # Send report (may need to split if too long)
+        if len(report) > 4000:
+            parts = [report[i:i+4000] for i in range(0, len(report), 4000)]
+            for part in parts:
+                await update.message.reply_text(part)
+        else:
+            await update.message.reply_text(report)
+    except Exception as e:
+        await update.message.reply_text(f"❌ Regime check failed: {e}")
+
+
+# ============================================================
 # /scan
 # ============================================================
 async def cmd_scan(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "🔍 Starting intraday scalp scan across 40 tickers...\n"
-        "This takes 3-5 minutes. You'll get an alert here if I find something good!"
+        "🔍 <b>Starting Enhanced Scan</b>\n\n"
+        "🤖 Running deep analysis with Qwen 2.5:\n"
+        "  • Algorithmic opportunity scoring\n"
+        "  • /analyze institutional research\n"
+        "  • /redteam adversarial validation\n\n"
+        "<i>This takes 5-8 minutes. You'll ONLY receive alerts for confirmed buy signals that pass red team review.</i>",
+        parse_mode="HTML"
     )
     data = _api(
         "/opportunities/scan",
         method="POST",
-        json={"session": "regular", "horizon": "scalp", "notify": True},
+        json={
+            "session": "regular",
+            "horizon": "scalp",
+            "notify": True,
+            "enhanced": True,
+            "alert_threshold": 65
+        },
         timeout=10,
     )
     if data.get("error"):
         await update.message.reply_text(f"❌ Scan failed: {data['error']}")
     else:
         await update.message.reply_text(
-            "✅ Scan started in background. "
-            "I'll send you an alert as soon as I find a high-conviction opportunity!"
+            "✅ <b>Enhanced scan started!</b>\n\n"
+            "🧠 AI is analyzing opportunities...\n"
+            "🛡️ Red team is validating setups...\n\n"
+            "<i>You'll receive alerts ONLY for confirmed buy signals.</i>",
+            parse_mode="HTML"
         )
 
 # ============================================================
@@ -633,6 +712,7 @@ def main():
     app.add_handler(CommandHandler("status", cmd_status))
     app.add_handler(CommandHandler("portfolio", cmd_portfolio))
     app.add_handler(CommandHandler("alerts", cmd_alerts))
+    app.add_handler(CommandHandler("regime", cmd_regime))
     app.add_handler(CommandHandler("scan", cmd_scan))
     app.add_handler(CommandHandler("opportunities", cmd_opportunities))
     app.add_handler(CommandHandler("opps", cmd_opportunities))

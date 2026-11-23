@@ -75,9 +75,9 @@ monitoring:
     midday_scan: 720
     postmarket_scan: 965
   opportunities:
-    default_universe_limit: 24
-    scheduled_universe_limit: 40
-    default_limit: 12
+    default_universe_limit: 75
+    scheduled_universe_limit: 75
+    default_limit: 15
     alert_min_score: 65
     include_options: true
     sessions:
@@ -103,43 +103,89 @@ monitoring:
     min_premium: 10000
   watchlists:
     Technology:
-    - OPEN
-    - AAPL
-    - GOOG
-    - META
-    - MSFT
-    - ORCL
-    - AMZN
-    - VRT
-    - PLTR
-    - QCOM
-    - ARM
-    - SOUN
-    - ANET
-    - DELL
-    - NVDA
-    - CRWV
-    - TSM
-    - AVGO
-    - TSLA
-    - AMD
-    - SNDK
-    - MSTR
-    - SMCI
-    - CLSK
-    - ASML
-    - COHR
-    - IREN
-    - MU
-    - INTC
-    AI Infrastructure:
-    - NBIS
-    - FN
-    - AXTI
-    - LITE
-    - CRDO
-    - MRVL
-    - AAOI
+      - AAPL
+      - MSFT
+      - GOOG
+      - GOOGL
+      - META
+      - AMZN
+      - NFLX
+      - ORCL
+      - PYPL
+      - SNAP
+      - SOFI
+      - PLTR
+      - SOUN
+      - ANET
+      - DELL
+      - CRWV
+      - COHR
+      - NBIS
+      - AXTI
+      - LITE
+      - CRDO
+      - AAOI
+      - VRT
+      - FN
+      - SNDK
+      - SKHY
+      - SMCI
+    Semiconductors:
+      - NVDA
+      - AMD
+      - INTC
+      - TSM
+      - AVGO
+      - MU
+      - QCOM
+      - NXPI
+      - ARM
+      - LRCX
+      - MRVL
+      - RMBS
+      - STX
+      - WDC
+    Crypto & Blockchain:
+      - CLSK
+      - MARA
+      - COIN
+      - IREN
+      - MSTR
+    Energy:
+      - XOM
+      - CVX
+      - COP
+      - SLB
+      - HAL
+      - USO
+    Financials:
+      - BAC
+      - WFC
+      - SCHW
+      - V
+    Automotive & EV:
+      - TSLA
+      - NIO
+      - XPEV
+      - RIVN
+      - F
+      - CVNA
+    Consumer & Industrials:
+      - LULU
+      - DIS
+      - BA
+      - JNJ
+    Metals & Mining:
+      - WPM
+      - RGLD
+      - AEM
+      - HMY
+      - NEM
+      - KGC
+      - FNV
+    Other:
+      - BABA
+      - BRK.A
 notifications:
   telegram:
     enabled: false

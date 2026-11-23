@@ -1054,8 +1054,18 @@ def get_opportunities(
     }
 
 
-def build_opportunity_brief(scan_result, max_items=5):
-    """Compact text brief suitable for OpenClaw messages or notifications."""
+def build_opportunity_brief(scan_result, max_items=5, refresh_prices=True):
+    """
+    Compact text brief suitable for OpenClaw messages or notifications.
+    
+    Parameters:
+        scan_result: dict - The scan result containing opportunities
+        max_items: int - Maximum number of opportunities to include
+        refresh_prices: bool - If True, refresh current prices before formatting alert
+    """
+    import logging
+    logger = logging.getLogger("finclaw.opportunity_engine")
+    
     session = scan_result.get("session", "market")
     horizon = scan_result.get("horizon_label", scan_result.get("horizon", "opportunities"))
     rows = scan_result.get("opportunities", [])[:max_items]
@@ -1069,12 +1079,40 @@ def build_opportunity_brief(scan_result, max_items=5):
 
     lines = [f"🎯 <b>FinClaw {session.title()} {horizon.title()} Opportunities</b>\n"]
     for item in rows:
-        price = item.get("price", 0)
-        score = item.get("score", 0)
         ticker = item.get("ticker", "")
+        score = item.get("score", 0)
         action = item.get("action", "")
         rr = item.get("risk_reward")
         thesis = item.get("thesis", "")
+        
+        # Refresh current price before displaying alert
+        original_price = item.get("price", 0)
+        price = original_price
+        
+        if refresh_prices and ticker:
+            try:
+                logger.info(f"[{ticker}] Refreshing price for alert (original: ${original_price})")
+                fresh_quote = get_stock_quote(ticker)
+                if fresh_quote and not fresh_quote.get("error"):
+                    fresh_price = _safe_float(fresh_quote.get("price"))
+                    if fresh_price and fresh_price > 0:
+                        price = fresh_price
+                        price_change_pct = ((price - original_price) / original_price * 100) if original_price else 0
+                        logger.info(f"[{ticker}] Price refreshed: ${price} ({price_change_pct:+.2f}% from scan)")
+                        
+                        # Recalculate price levels with fresh price
+                        atr = item.get("atr")
+                        horizon_key = item.get("horizon", horizon)
+                        if atr:
+                            fresh_levels = _price_levels(price, atr, horizon_key)
+                            item.update(fresh_levels)
+                            logger.info(f"[{ticker}] Levels recalculated: Entry {fresh_levels.get('entry_low')}-{fresh_levels.get('entry_high')}, Target {fresh_levels.get('target_price')}, Stop {fresh_levels.get('stop_loss')}")
+                    else:
+                        logger.warning(f"[{ticker}] Invalid fresh price: {fresh_price}, using original ${original_price}")
+                else:
+                    logger.warning(f"[{ticker}] Failed to refresh price: {fresh_quote.get('error')}, using original ${original_price}")
+            except Exception as e:
+                logger.error(f"[{ticker}] Error refreshing price: {e}, using original ${original_price}")
         
         # Visual cues for score
         score_emoji = "🔥" if score >= 80 else ("⚡" if score >= 60 else "📊")
@@ -1083,8 +1121,8 @@ def build_opportunity_brief(scan_result, max_items=5):
         action_str = f"🟢 <b>{action}</b>" if "buy" in action.lower() or "watch" in action.lower() else f"🔴 <b>{action}</b>"
         
         levels = (
-            f"Entry: <b>{item.get('entry_low')} - {item.get('entry_high')}</b> | "
-            f"Target: <b>{item.get('target_price')}</b> | Stop: <b>{item.get('stop_loss')}</b>"
+            f"Entry: <b>${item.get('entry_low')} - ${item.get('entry_high')}</b> | "
+            f"Target: <b>${item.get('target_price')}</b> | Stop: <b>${item.get('stop_loss')}</b>"
         )
         gw = item.get("gamma_walls")
         if gw:
@@ -1093,12 +1131,12 @@ def build_opportunity_brief(scan_result, max_items=5):
         rr_text = f" | R/R: <b>{rr}:1</b>" if rr is not None else ""
         
         lines.append(f"📈 <b>{ticker}</b> • {action_str} • Score: <b>{score}</b> {score_emoji}")
-        lines.append(f"💵 Price: <b>${price}</b>")
+        lines.append(f"💵 Current Price: <b>${price}</b>")
         lines.append(f"🎯 {levels}{rr_text}")
         if thesis:
             lines.append(f"📝 <i>Thesis:</i> {thesis}")
         lines.append("──────────────") # Separator
         
     lines.append("<i>💡 Use /analyze &lt;ticker&gt; or /redteam &lt;ticker&gt; for Qwen 2.5 risk validation before entering.</i>")
-    lines.append("<i>⚠️ Not financial advice. Verify prices, liquidity, and catalysts before acting. Real-time data provided by Charles Schwab.</i>")
+    lines.append("<i>⚠️ Not financial advice. Verify current prices, liquidity, and catalysts before acting. Real-time data provided by Charles Schwab.</i>")
     return "\n".join(lines)

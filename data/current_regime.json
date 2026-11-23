@@ -1,0 +1,15 @@
+{
+  "regime": "high_vol",
+  "regime_changed": true,
+  "position_sizing": "defensive",
+  "preferred_timeframe": "swing",
+  "stop_loss_multiplier": 1.2,
+  "cash_allocation_pct": 10,
+  "min_opportunity_score": 60,
+  "universe_limit": 50,
+  "strategy_summary": "Adapt to high volatility by reducing position size and focusing on swing trades. Maintain a defensive stance with tighter stop-losses and a higher allocation to cash.",
+  "reasoning": "The current VIX level of 26.62 indicates a high volatility regime, up from the previous unknown state. This suggests increased market uncertainty and potential for significant price movements. Adjustments are necessary to manage risk and protect capital.",
+  "timestamp": "2026-11-23T16:01:03.022972",
+  "vix_level": 26.62,
+  "market_breadth": "mixed"
+}

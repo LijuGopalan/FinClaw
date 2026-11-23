@@ -559,14 +559,52 @@ def api_redteam_ticker(ticker):
         return jsonify({"error": str(e), "ticker": clean_ticker}), 500
 
 
+@app.route("/api/regime/check", methods=["GET", "POST"])
+def api_regime_check():
+    """Check current market regime and get action plan."""
+    try:
+        from skills.market_regime_detector import check_market_regime_and_alert
+        import json
+        
+        # Load watchlist
+        with open("data/universe.json") as f:
+            watchlist = json.load(f)
+        
+        # Get portfolio drawdown if available
+        portfolio_dd = 0
+        try:
+            portfolio = get_portfolio_summary()
+            if portfolio and "summary" in portfolio:
+                portfolio_dd = portfolio["summary"].get("total_return_pct", 0)
+        except Exception:
+            pass
+        
+        # Check regime (don't auto-alert via this endpoint)
+        result = check_market_regime_and_alert(
+            watchlist,
+            portfolio_drawdown=portfolio_dd,
+            send_alert=False
+        )
+        
+        return jsonify(result)
+    except Exception as e:
+        logger.error(f"Regime check failed: {e}")
+        return jsonify({"error": str(e)}), 500
+
+
 @app.route("/api/opportunities/scan", methods=["POST"])
 def api_opportunities_scan():
     """
-    Run an opportunity scan, save it to scan history, and optionally notify.
+    Run an enhanced opportunity scan with deep analysis and red team validation.
+    Only sends alerts for confirmed buy signals.
     Runs asynchronously so the scheduler never times out waiting.
     """
     import threading
     data = request.json or {}
+    
+    # Check if enhanced scan is requested (default: True)
+    use_enhanced = _parse_bool(data.get("enhanced", "true"), True)
+    
     tickers = data.get("tickers")
     if isinstance(tickers, str):
         tickers = _parse_ticker_list(tickers)
@@ -580,88 +618,94 @@ def api_opportunities_scan():
         "horizon": data.get("horizon", "auto"),
         "tickers": tickers,
         "limit": int(data.get("limit", 12)),
-        "universe_limit": int(data.get("universe_limit", 40)),
+        "universe_limit": int(data.get("universe_limit", 75)),
         "min_score": int(data.get("min_score", 0)),
         "include_options": _parse_bool(data.get("include_options"), True),
         "notify": data.get("notify", False),
         "channels": data.get("channels"),
+        "enhanced": use_enhanced,
+        "alert_threshold": int(data.get("alert_threshold", 65)),
     }
 
     def run_scan_async(params):
         try:
-            result = get_opportunities(
-                session=params["session"],
-                horizon=params["horizon"],
-                tickers=params["tickers"],
-                limit=params["limit"],
-                universe_limit=params["universe_limit"],
-                min_score=params["min_score"],
-                include_options=params["include_options"],
-            )
-            brief = build_opportunity_brief(result)
-            scan_type = f"{result.get('session')}_{result.get('horizon')}_opportunities"
-            save_scan(scan_type, result)
-            logger.info("Scan complete: %s (%d opportunities)", scan_type, len(result.get('opportunities', [])))
-
-            if params["notify"] and brief:
-                try:
-                    from notifications import send_alert as notify
-                    notify(
-                        title=f"FinClaw {result.get('session')} opportunities",
-                        message=brief,
-                        channels=params["channels"],
-                    )
-                    top_ticker = (result.get("opportunities") or [{}])[0].get("ticker")
-                    save_alert(
-                        alert_type="info",
-                        title=f"{result.get('session', 'Market').title()} Opportunity Scan",
-                        message=brief,
-                        ticker=top_ticker,
-                    )
-                    logger.info("Telegram alert sent for %s", scan_type)
-                    
-                    # PORTFOLIO DEFENSE ALERTS
-                    for opp in result.get('opportunities', []):
-                        action = opp.get("action", "")
-                        if action in ["PROFIT-TAKE", "SELL/TRIM"]:
-                            reason_str = "; ".join(opp.get("reasons", []) + opp.get("risk_flags", []))
-                            notify(
-                                title=f"🚨 PORTFOLIO ALERT: {action} {opp.get('ticker')}",
-                                message=f"Price: ${opp.get('price')}\nReason: {reason_str}",
-                                channels=params["channels"],
-                            )
-                            save_alert(
-                                alert_type="warning",
-                                title=f"{action} {opp.get('ticker')}",
-                                message=f"Price: ${opp.get('price')}\nReason: {reason_str}",
-                                ticker=opp.get("ticker"),
-                            )
-
-                    # NEW: Advanced Manual Trading Alerts for High Conviction ML Signals
+            # Use enhanced scan if requested
+            if params.get("enhanced", True):
+                from skills.enhanced_scan import enhanced_scan, enhanced_scan_brief
+                
+                result = enhanced_scan(
+                    session=params["session"],
+                    horizon=params["horizon"],
+                    max_workers=3,
+                    notify=params["notify"],
+                    alert_threshold=params.get("alert_threshold", 65),
+                )
+                
+                scan_type = f"{params['session']}_{params['horizon']}_enhanced_scan"
+                save_scan(scan_type, result)
+                
+                logger.info(
+                    "Enhanced scan complete: %d total, %d analyzed, %d confirmed buys, %d alerts sent",
+                    result.get("total_opportunities", 0),
+                    result.get("candidates_analyzed", 0),
+                    result.get("confirmed_buys", 0),
+                    result.get("alerts_sent", 0)
+                )
+                
+                # Send summary if no alerts were sent
+                if params["notify"] and result.get("confirmed_buys", 0) == 0:
                     try:
-                        from skills.execution_engine import execute_trade_from_signal
-                        for opp in result.get('opportunities', []):
-                            alert_res = execute_trade_from_signal(opp)
-                            if alert_res.get("status") == "alert_sent":
-                                notify(
-                                    title=f"Manual Trade Alert: {opp.get('ticker')}",
-                                    message=alert_res.get("message"),
-                                    channels=params["channels"],
-                                )
-                    except Exception as ex:
-                        logger.error("Failed to generate manual trade alerts: %s", ex)
+                        from notifications import send_telegram
+                        summary = enhanced_scan_brief(result)
+                        send_telegram(summary, parse_mode="HTML")
+                    except Exception as e:
+                        logger.error(f"Failed to send scan summary: {e}")
                         
-                except Exception as e:
-                    logger.error("Opportunity notification failed: %s", e)
+            else:
+                # Legacy scan mode
+                result = get_opportunities(
+                    session=params["session"],
+                    horizon=params["horizon"],
+                    tickers=params["tickers"],
+                    limit=params["limit"],
+                    universe_limit=params["universe_limit"],
+                    min_score=params["min_score"],
+                    include_options=params["include_options"],
+                )
+                brief = build_opportunity_brief(result)
+                scan_type = f"{result.get('session')}_{result.get('horizon')}_opportunities"
+                save_scan(scan_type, result)
+                logger.info("Scan complete: %s (%d opportunities)", scan_type, len(result.get('opportunities', [])))
+
+                if params["notify"] and brief:
+                    try:
+                        from notifications import send_alert as notify
+                        notify(
+                            title=f"FinClaw {result.get('session')} opportunities",
+                            message=brief,
+                            channels=params["channels"],
+                        )
+                        top_ticker = (result.get("opportunities") or [{}])[0].get("ticker")
+                        save_alert(
+                            alert_type="info",
+                            title=f"{result.get('session', 'Market').title()} Opportunity Scan",
+                            message=brief,
+                            ticker=top_ticker,
+                        )
+                        logger.info("Telegram alert sent for %s", scan_type)
+                    except Exception as e:
+                        logger.error("Opportunity notification failed: %s", e)
         except Exception as e:
             logger.error("Background scan failed: %s", e)
 
     thread = threading.Thread(target=run_scan_async, args=(scan_params,), daemon=True)
     thread.start()
 
+    enhanced_msg = " with deep analysis and red team validation" if scan_params.get("enhanced", True) else ""
     return jsonify({
         "status": "accepted",
-        "message": "Scan started in background. Telegram alert will fire when complete (if high-conviction signals found).",
+        "message": f"Enhanced scan started in background{enhanced_msg}. You'll receive alerts only for confirmed buy signals that pass both algorithmic scoring AND red team review.",
+        "enhanced": scan_params.get("enhanced", True),
     }), 202
 
 

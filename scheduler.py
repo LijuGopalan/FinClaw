@@ -274,6 +274,7 @@ def run_scheduler():
     last_daily_journal = None
     last_weekly_review = None
     last_volatility_check = None
+    last_regime_check = None  # NEW: Market regime detection
 
     while True:
         # Enforce CST timezone for all scheduling logic
@@ -312,6 +313,37 @@ def run_scheduler():
             if now.hour == 8 and now.minute == 15 and last_premarket_day != today_str:
                 trigger_llm_brief("premarket")
                 last_premarket_day = today_str
+            
+            # ── 09:00 CST — Market Regime Check (Market Open) ─────────────
+            if now.hour == 9 and now.minute == 0 and last_regime_check != today_str:
+                try:
+                    from skills.market_regime_detector import check_market_regime_and_alert
+                    import json
+                    
+                    # Load watchlist
+                    with open("data/universe.json") as f:
+                        watchlist = json.load(f)
+                    
+                    # Get portfolio drawdown
+                    portfolio_dd = 0
+                    try:
+                        portfolio = _api_get("/portfolio")
+                        if portfolio and "summary" in portfolio:
+                            portfolio_dd = portfolio["summary"].get("total_return_pct", 0)
+                    except Exception:
+                        pass
+                    
+                    # Check regime (auto-alerts if risk >= 40)
+                    regime_result = check_market_regime_and_alert(
+                        watchlist, 
+                        portfolio_drawdown=portfolio_dd,
+                        send_alert=True
+                    )
+                    
+                    logging.info(f"Market regime: {regime_result.get('regime')}, Risk: {regime_result.get('risk_score')}/100")
+                    last_regime_check = today_str
+                except Exception as e:
+                    logging.error(f"Market regime check failed: {e}")
 
             # ── 08:30–16:00 CST — Intraday scalp scan (algorithmic, every 15 min) ──
             if 8 <= now.hour < 16:
