@@ -75,18 +75,19 @@ def process_ticker(ticker):
         # Target: Max high in next 12 periods (1 hour) relative to current close
         # Shift -12, take rolling max backwards (by reversing or shifting)
         indexer = pd.api.indexers.FixedForwardWindowIndexer(window_size=12)
-        future_high = hist['High'].rolling(window=indexer, min_periods=1).max()
+        future_high = hist['High'].shift(-1).rolling(window=indexer, min_periods=12).max()
         
         hist['future_move'] = (future_high - hist['Close']) / hist['Close'] * 100
         hist['target'] = (hist['future_move'] >= 1.0).astype(int)
         
         # Drop NaNs created by rolling windows
-        hist = hist.dropna()
+        hist = hist.iloc[:-12].dropna()
         
         # Select final columns
         features = ['rsi', 'macd_hist', 'atr_pct', 'rvol', 'vwap_dist', 'target']
         result = hist[features].copy()
         result['ticker'] = ticker
+        result['timestamp'] = hist.index.astype(str)
         
         return result
     except Exception as e:

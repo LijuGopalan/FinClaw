@@ -8,8 +8,7 @@ with local Qwen 2.5 reasoning to provide:
 """
 
 import logging
-import os
-import re
+import json
 from datetime import datetime
 from dotenv import load_dotenv
 
@@ -18,7 +17,7 @@ load_dotenv()
 logger = logging.getLogger("finclaw.deep_analysis")
 
 try:
-    from skills.llm import ask
+    from skills.llm import ask_json
     from skills.financial_skills import (
         get_stock_quote,
         get_technical_analysis,
@@ -28,7 +27,7 @@ try:
         get_insider_activity,
     )
 except ImportError:
-    from llm import ask
+    from llm import ask_json
     from financial_skills import (
         get_stock_quote,
         get_technical_analysis,
@@ -50,6 +49,46 @@ Write an institutional-grade investment & trade execution memo grounded strictly
 Never fabricate numbers. Be concise, mathematically grounded, and decisive.
 Format clearly with distinct sections and bullet points.
 """
+
+_RED_TEAM_SCHEMA = {
+    "type": "object",
+    "additionalProperties": False,
+    "required": ["verdict", "risk_score", "failure_modes", "key_invalidation", "inference", "recommendation"],
+    "properties": {
+        "verdict": {"type": "string", "enum": ["PASS", "CAUTION", "REJECT"]},
+        "risk_score": {"type": "integer", "minimum": 1, "maximum": 10},
+        "failure_modes": {"type": "array", "items": {"type": "string"}},
+        "key_invalidation": {"type": "string"},
+        "inference": {"type": "string"},
+        "recommendation": {"type": "string"},
+    },
+}
+
+_RESEARCH_SCHEMA = {
+    "type": "object",
+    "additionalProperties": False,
+    "required": [
+        "technical_structure", "fundamental_quality", "risk_analysis",
+        "inferences", "recommendation",
+    ],
+    "properties": {
+        "technical_structure": {"type": "string"},
+        "fundamental_quality": {"type": "string"},
+        "risk_analysis": {"type": "string"},
+        "inferences": {"type": "array", "items": {"type": "string"}},
+        "recommendation": {
+            "type": "object",
+            "additionalProperties": False,
+            "required": ["state", "conviction", "primary_catalyst", "action_plan"],
+            "properties": {
+                "state": {"type": "string", "enum": ["BULLISH", "BEARISH", "NEUTRAL"]},
+                "conviction": {"type": "integer", "minimum": 1, "maximum": 10},
+                "primary_catalyst": {"type": "string"},
+                "action_plan": {"type": "string"},
+            },
+        },
+    },
+}
 
 
 def _gather_ticker_intelligence(ticker: str) -> dict:
@@ -87,7 +126,7 @@ def red_team_validate(ticker: str, setup_data: dict = None) -> dict:
     news_items = data["news"]
     
     price = setup_data.get("price") if setup_data else q.get("price")
-    change_pct = q.get("change_pct", 0)
+    change_pct = q.get("change_pct", 0) or 0
     action = setup_data.get("action", "BUY WATCH") if setup_data else "BUY WATCH"
     entry_low = setup_data.get("entry_low", "N/A") if setup_data else "Market"
     entry_high = setup_data.get("entry_high", "N/A") if setup_data else "Market"
@@ -126,46 +165,48 @@ LIVE MARKET METRICS:
 RECENT HEADLINES:
 {news_str}
 
-Respond in this exact structured format (keep under 200 words):
-VERDICT: [PASS, CAUTION, or REJECT]
-RISK_SCORE: [1 to 10, where 10 is an obvious trap/extreme risk]
-FAILURE_MODES:
-1. <Top failure mode>
-2. <Second failure mode>
-KEY_INVALIDATION: <Specific price level or trigger where the trade must be abandoned>
-RED_TEAM_TAKE: <1-2 sharp sentences with the unvarnished truth>
+Return a structured risk assessment. Keep it under 200 words. Do not invent prices;
+the invalidation must use the supplied stop or a non-price trigger. Separate your
+interpretation from the supplied market facts.
 """
 
-    response = ask(prompt, system=RED_TEAM_SYSTEM_PROMPT, max_tokens=1500)
-    
-    # Parse verdict
-    verdict_match = re.search(r"VERDICT:\s*(\w+)", response, re.IGNORECASE)
-    verdict = verdict_match.group(1).upper() if verdict_match else "CAUTION"
-    if verdict not in ["PASS", "CAUTION", "REJECT"]:
-        verdict = "CAUTION"
+    result = ask_json(
+        prompt,
+        schema=_RED_TEAM_SCHEMA,
+        system=RED_TEAM_SYSTEM_PROMPT,
+        max_tokens=1500,
+        task="risk",
+    )
+    if (
+        result.get("verdict") not in {"PASS", "CAUTION", "REJECT"}
+        or isinstance(result.get("risk_score"), bool)
+        or not isinstance(result.get("risk_score"), int)
+        or not 1 <= result["risk_score"] <= 10
+        or not isinstance(result.get("failure_modes"), list)
+        or not all(isinstance(item, str) for item in result["failure_modes"])
+        or not isinstance(result.get("key_invalidation"), str)
+        or not isinstance(result.get("inference"), str)
+        or not isinstance(result.get("recommendation"), str)
+    ):
+        raise ValueError("Red-team response failed schema validation")
 
-    # Parse risk score
-    score_match = re.search(r"RISK_SCORE:\s*(\d+)", response)
-    risk_score = int(score_match.group(1)) if score_match else 5
-
-    # Extract failure modes
-    failure_modes = []
-    for line in response.split("\n"):
-        line_clean = line.strip()
-        if re.match(r"^(\d+\.|\-|\•)\s+", line_clean) and ("FAILURE" not in line_clean.upper()):
-            failure_modes.append(re.sub(r"^(\d+\.|\-|\•)\s*", "", line_clean))
-
-    # Extract invalidation
-    inval_match = re.search(r"KEY_INVALIDATION:\s*(.+)", response, re.IGNORECASE)
-    invalidation = inval_match.group(1).strip() if inval_match else f"Breach below stop loss ${stop}"
+    evidence = {
+        "quote": q,
+        "technicals": tech,
+        "fundamentals": fund,
+        "headlines": [item.get("title") for item in news_items[:4] if item.get("title")],
+    }
 
     return {
         "ticker": ticker,
-        "verdict": verdict,
-        "risk_score": risk_score,
-        "failure_modes": failure_modes[:3],
-        "key_invalidation": invalidation,
-        "raw_critique": response,
+        "verdict": result["verdict"],
+        "risk_score": result["risk_score"],
+        "failure_modes": result["failure_modes"][:3],
+        "key_invalidation": result["key_invalidation"],
+        "evidence": evidence,
+        "inference": result["inference"],
+        "recommendation": result["recommendation"],
+        "raw_critique": json.dumps(result, indent=2),
         "timestamp": datetime.utcnow().isoformat(),
     }
 
@@ -224,30 +265,94 @@ def generate_institutional_report(ticker: str) -> dict:
 • Invalidation Condition: {red_team.get('key_invalidation')}
 
 TASK:
-Synthesize this into a high-conviction institutional trade memo. Format with these exact markdown headers:
-🏛️ **EXECUTIVE VERDICT**
-(State: BULLISH / BEARISH / NEUTRAL | Conviction: X/10 | Primary Catalyst)
-
-📊 **TECHNICAL STRUCTURE & KEY LEVELS**
-(Support, Resistance, Trend state, Momentum)
-
-🏢 **FUNDAMENTAL QUALITY**
-(Valuation check, Balance sheet safety, Margin strength)
-
-🛡️ **RED TEAM RISK & FAILURE MODES**
-(Why this trade could blow up, key risks to monitor)
-
-🎯 **ACTIONABLE EXECUTION PLAN**
-(Entry Corridor, Hard Stop Loss, Target 1, Target 2, Risk/Reward Ratio)
+Use only the supplied data. Separate observed evidence from inference. Do not invent
+support, resistance, prices, catalysts, or financial metrics. Return fields matching
+the requested response schema; action_plan must not introduce prices absent above.
 """
 
-    report_text = ask(prompt, system=INSTITUTIONAL_STRATEGIST_SYSTEM_PROMPT, max_tokens=3000)
+    analysis = ask_json(
+        prompt,
+        schema=_RESEARCH_SCHEMA,
+        system=INSTITUTIONAL_STRATEGIST_SYSTEM_PROMPT,
+        max_tokens=3000,
+        task="research",
+    )
+    recommendation = analysis["recommendation"]
+    if (
+        not isinstance(recommendation, dict)
+        or recommendation.get("state") not in {"BULLISH", "BEARISH", "NEUTRAL"}
+        or isinstance(recommendation.get("conviction"), bool)
+        or not isinstance(recommendation.get("conviction"), int)
+        or not 1 <= recommendation["conviction"] <= 10
+        or not all(isinstance(analysis.get(key), str) for key in (
+            "technical_structure", "fundamental_quality", "risk_analysis",
+        ))
+        or not isinstance(analysis.get("inferences"), list)
+        or not all(isinstance(item, str) for item in analysis["inferences"])
+    ):
+        raise ValueError("Institutional report failed schema validation")
+
+    evidence = {
+        "quote": {
+            key: q.get(key)
+            for key in ("price", "change_pct", "volume", "source", "timestamp")
+        },
+        "technicals": tech,
+        "fundamentals": fund,
+        "news": news[:5],
+        "insider_signals": insider_sig[:10],
+        "options_summary": {
+            key: options.get(key)
+            for key in (
+                "source", "expiry", "put_call_ratio", "unusual_activity",
+                "top_call_strikes", "top_put_strikes",
+            )
+            if isinstance(options, dict) and key in options
+        },
+        "red_team": red_team.get("evidence"),
+    }
+    memo_lines = [
+        "🏛️ **EXECUTIVE VERDICT**",
+        f"State: {recommendation['state']} | Conviction: {recommendation['conviction']}/10 | "
+        f"Primary Catalyst: {recommendation['primary_catalyst']}",
+        "",
+        "📚 **OBSERVED EVIDENCE**",
+        f"- Quote: {q.get('price')} ({q.get('source', 'source unavailable')}; {q.get('timestamp', 'timestamp unavailable')})",
+        f"- Technical data: RSI {tech.get('rsi_14', 'N/A')}, ATR {tech.get('atr_14', 'N/A')}, "
+        f"SMA-20/50/200 {tech.get('sma_20', 'N/A')}/{tech.get('sma_50', 'N/A')}/{tech.get('sma_200', 'N/A')}",
+        f"- Fundamentals: market cap {fund.get('market_cap_fmt', 'N/A')}, "
+        f"P/E {fund.get('valuation', {}).get('pe_trailing', 'N/A')}",
+        f"- News: {news_txt.replace(chr(10), '; ')}",
+        f"- Insider activity: {insider_txt}",
+        "",
+        "🧠 **INFERENCE**",
+        *[f"- {item}" for item in analysis["inferences"]],
+        "",
+        "📊 **TECHNICAL STRUCTURE**",
+        analysis["technical_structure"],
+        "",
+        "🏢 **FUNDAMENTAL QUALITY**",
+        analysis["fundamental_quality"],
+        "",
+        "🛡️ **RISK ANALYSIS**",
+        analysis["risk_analysis"],
+        f"- Red-team verdict: {red_team.get('verdict')} (risk {red_team.get('risk_score')}/10)",
+        f"- Failure modes: {'; '.join(red_team.get('failure_modes', []))}",
+        "",
+        "🎯 **RECOMMENDATION**",
+        f"- Action plan: {recommendation['action_plan']}",
+        f"- Red-team recommendation: {red_team.get('recommendation')}",
+    ]
+    report_text = "\n".join(memo_lines)
 
     return {
         "ticker": ticker,
         "price": q.get("price"),
         "change_pct": q.get("change_pct"),
         "red_team": red_team,
+        "evidence": evidence,
+        "inference": analysis["inferences"],
+        "recommendation": recommendation,
         "memo": report_text,
         "generated_at": datetime.utcnow().isoformat(),
     }

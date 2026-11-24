@@ -55,6 +55,7 @@ from db import (
     init_db,
     save_signal,
     resolve_signal,
+    record_signal_observation,
     get_signals,
     get_signal_performance,
     save_portfolio_snapshot,
@@ -355,7 +356,7 @@ def api_save_signal():
     if not data:
         return jsonify({"error": "No data provided"}), 400
 
-    save_signal(
+    signal_id = save_signal(
         ticker=data.get("ticker"),
         action=data.get("action"),
         horizon=data.get("horizon"),
@@ -366,8 +367,16 @@ def api_save_signal():
         stop_loss=data.get("stop_loss"),
         thesis=data.get("thesis"),
         price_at_signal=data.get("price_at_signal"),
+        source=data.get("source", "manual"),
+        evidence=data.get("evidence"),
+        risk_gate=data.get("risk_gate"),
+        inference=data.get("inference"),
+        recommendation=data.get("recommendation"),
+        model_probability=data.get("model_probability"),
+        model_calibration=data.get("model_calibration"),
+        regime=data.get("regime"),
     )
-    return jsonify({"status": "saved"})
+    return jsonify({"status": "saved", "signal_id": signal_id})
 
 
 @app.route("/api/signals/<int:signal_id>/resolve", methods=["POST"])
@@ -379,6 +388,11 @@ def api_resolve_signal(signal_id):
         data.get("outcome"),
         data.get("outcome_price"),
         data.get("outcome_return_pct"),
+        entry_filled=data.get("entry_filled"),
+        fill_price=data.get("fill_price"),
+        fees=data.get("fees"),
+        slippage=data.get("slippage"),
+        outcome_method=data.get("outcome_method"),
     )
     return jsonify({"status": "resolved"})
 
@@ -391,15 +405,16 @@ def api_signal_performance():
 
 @app.route("/api/signals/resolve", methods=["POST"])
 def api_resolve_signals():
-    """Auto-resolve all OPEN signals against current prices."""
+    """Record current price observations for open signals without assuming fills."""
     try:
         from signal_resolver import resolve_open_signals
         result = resolve_open_signals(
             get_stock_quote_fn=get_stock_quote,
             get_signals_fn=get_signals,
             resolve_signal_fn=resolve_signal,
+            record_observation_fn=record_signal_observation,
         )
-        return jsonify({"status": "resolved", "results": result})
+        return jsonify({"status": "observed", "results": result})
     except Exception as e:
         logger.error("Signal resolution failed: %s", e)
         return jsonify({"error": str(e)}), 500
@@ -514,8 +529,8 @@ def api_opportunities():
     horizon = request.args.get("horizon", "auto")
     tickers = _parse_ticker_list(request.args.get("tickers"))
     limit = int(request.args.get("limit", 12))
-    universe_limit = int(request.args.get("universe_limit", 24))
-    min_score = int(request.args.get("min_score", 0))
+    universe_limit = request.args.get("universe_limit", type=int)
+    min_score = request.args.get("min_score", type=int)
     include_options = _parse_bool(request.args.get("include_options"), True)
 
     result = get_opportunities(

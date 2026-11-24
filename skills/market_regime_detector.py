@@ -13,10 +13,30 @@ logger = logging.getLogger("finclaw.market_regime")
 
 try:
     from skills.financial_skills import get_stock_quote, get_technical_analysis, get_price_history
-    from skills.llm import ask
+    from skills.llm import ask_json
 except ImportError:
     from financial_skills import get_stock_quote, get_technical_analysis, get_price_history
-    from llm import ask
+    from llm import ask_json
+
+
+_ACTION_PLAN_SCHEMA = {
+    "type": "object",
+    "additionalProperties": False,
+    "required": ["verdict", "reasoning", "immediate_actions", "what_to_watch", "reentry_signals"],
+    "properties": {
+        "verdict": {
+            "type": "string",
+            "enum": [
+                "SELL ALL & GO TO CASH", "REDUCE EXPOSURE 50%", "STAY DEFENSIVE",
+                "HOLD CURRENT", "BUY THE DIP",
+            ],
+        },
+        "reasoning": {"type": "string"},
+        "immediate_actions": {"type": "array", "items": {"type": "string"}},
+        "what_to_watch": {"type": "array", "items": {"type": "string"}},
+        "reentry_signals": {"type": "array", "items": {"type": "string"}},
+    },
+}
 
 
 def get_market_indices() -> Dict:
@@ -258,6 +278,7 @@ def generate_action_plan(
     indices: Dict,
     vix: Dict,
     breadth: Dict,
+    portfolio_drawdown: float = 0,
 ) -> Dict:
     """
     Use Qwen 2.5 to generate actionable trading plan based on market regime.
@@ -304,27 +325,8 @@ MARKET BREADTH:
 
 You are FinClaw Risk Officer. Based on this data, provide IMMEDIATE actionable guidance.
 
-Respond in this EXACT format (keep under 300 words):
-
-**VERDICT:** [SELL ALL & GO TO CASH | REDUCE EXPOSURE 50% | STAY DEFENSIVE | HOLD CURRENT | BUY THE DIP]
-
-**REASONING:** (2-3 sentences explaining why)
-
-**IMMEDIATE ACTIONS:**
-1. [Specific action 1]
-2. [Specific action 2]
-3. [Specific action 3]
-
-**WHAT TO WATCH:**
-• [Key level or indicator to monitor]
-• [Condition for changing stance]
-
-**RE-ENTRY SIGNALS:**
-(When will it be safe to buy again?)
-• [Signal 1]
-• [Signal 2]
-
-Be direct and decisive. This user wants CLEAR instructions on what to do RIGHT NOW."""
+Return the constrained JSON object. Use only supplied facts, separate evidence-based
+reasoning from suggested actions, and do not invent price levels."""
 
     system_prompt = """You are FinClaw Risk Officer, responsible for capital preservation.
 Your job is to protect the user from severe drawdowns and market crashes.
@@ -333,13 +335,48 @@ If the data shows danger, tell them to SELL and go to CASH.
 If it's safe, tell them to HOLD or BUY.
 Never be wishy-washy — give clear, actionable instructions."""
 
-    response = ask(prompt, system=system_prompt, max_tokens=2000)
+    result = ask_json(
+        prompt,
+        schema=_ACTION_PLAN_SCHEMA,
+        system=system_prompt,
+        max_tokens=2000,
+        task="regime",
+    )
+    if (
+        result.get("verdict") not in _ACTION_PLAN_SCHEMA["properties"]["verdict"]["enum"]
+        or not isinstance(result.get("reasoning"), str)
+        or not all(
+            isinstance(result.get(key), list)
+            and all(isinstance(item, str) for item in result[key])
+            for key in ("immediate_actions", "what_to_watch", "reentry_signals")
+        )
+    ):
+        raise ValueError("Market regime action plan failed schema validation")
+
+    action_plan = "\n".join([
+        f"**VERDICT:** {result['verdict']}",
+        f"**REASONING:** {result['reasoning']}",
+        "**IMMEDIATE ACTIONS:**",
+        *[f"{i}. {item}" for i, item in enumerate(result["immediate_actions"], 1)],
+        "**WHAT TO WATCH:**",
+        *[f"• {item}" for item in result["what_to_watch"]],
+        "**RE-ENTRY SIGNALS:**",
+        *[f"• {item}" for item in result["reentry_signals"]],
+    ])
     
     return {
         "regime": regime,
         "risk_score": risk_score,
         "warnings": warnings,
-        "action_plan": response,
+        "action_plan": action_plan,
+        "evidence": {
+            "indices": indices,
+            "vix": vix,
+            "breadth": breadth,
+            "portfolio_drawdown": portfolio_drawdown,
+        },
+        "inference": result["reasoning"],
+        "recommendation": result,
         "timestamp": datetime.utcnow().isoformat(),
     }
 
@@ -375,7 +412,9 @@ def check_market_regime_and_alert(
     logger.info(f"Market Regime: {regime}, Risk Score: {risk_score}/100")
     
     # Generate action plan with Qwen
-    result = generate_action_plan(regime, risk_score, warnings, indices, vix, breadth)
+    result = generate_action_plan(
+        regime, risk_score, warnings, indices, vix, breadth, portfolio_drawdown
+    )
     
     # Send alert if defensive action needed
     if send_alert and risk_score >= 40:  # Correction or worse

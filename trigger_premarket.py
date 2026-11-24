@@ -99,7 +99,7 @@ def run_premarket_brief():
     prompt = f"{context}\n\n---\nYOUR TASK:\n{task}"
 
     logging.info("Sending prompt to LLM...")
-    response = apply_earnings_guard(ask(prompt, max_tokens=1500), api_data)
+    response = apply_earnings_guard(ask(prompt, max_tokens=1500, task="brief"), api_data)
 
     header = "🌅 <b>FinClaw Pre-Market Brief</b>"
     message = f"{header}\n\n{response}"

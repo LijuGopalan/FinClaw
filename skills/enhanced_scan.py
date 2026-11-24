@@ -70,6 +70,11 @@ def is_confirmed_buy(opp: dict) -> bool:
     redteam_verdict = opp.get("redteam_verdict", "REJECT").upper()
     redteam_risk = opp.get("redteam_risk_score", 10)
     score = opp.get("score", 0)
+    risk_gate = opp.get("risk_gate")
+
+    if not isinstance(risk_gate, dict) or risk_gate.get("passed") is not True:
+        logger.debug(f"[{opp.get('ticker')}] Filtered: Deterministic risk gate failed or missing")
+        return False
     
     # Must be a buy action
     if "BUY" not in action:

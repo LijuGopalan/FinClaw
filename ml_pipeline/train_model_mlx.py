@@ -36,8 +36,9 @@ import json
 import time
 import numpy as np
 import pandas as pd
-from sklearn.model_selection import train_test_split
-from sklearn.metrics import accuracy_score, precision_score, classification_report
+from sklearn.metrics import accuracy_score, brier_score_loss, log_loss, precision_score, classification_report
+
+from calibration import apply_platt_scaling, fit_platt_scaling, sha256_file, temporal_split
 
 # ── MLX guard: Apple Silicon only ────────────────────────────────────────────
 try:
@@ -57,6 +58,7 @@ DATA_PATH    = os.path.join(BASE_DIR, "data",   "ml_dataset.csv")
 MODEL_DIR    = os.path.join(BASE_DIR, "models")
 WEIGHTS_PATH = os.path.join(MODEL_DIR, "finclaw_mlx.npz")
 CONFIG_PATH  = os.path.join(MODEL_DIR, "finclaw_mlx_config.json")
+CALIBRATION_PATH = os.path.join(MODEL_DIR, "finclaw_mlx_calibration.json")
 
 # ── Hyperparameters ───────────────────────────────────────────────────────────
 FEATURES     = ["rsi", "macd_hist", "atr_pct", "rvol", "vwap_dist"]
@@ -187,23 +189,28 @@ def train():
         )
 
     print("🚀 Loading dataset...")
-    df = pd.read_csv(DATA_PATH).dropna(subset=FEATURES + ["target"])
-
-    X = df[FEATURES].values.astype(np.float32)
-    y = df["target"].values.astype(np.float32)
+    df = pd.read_csv(DATA_PATH).dropna(subset=FEATURES + ["target", "timestamp"])
+    train_df, calibration_df, test_df = temporal_split(df)
+    if any(part["target"].nunique() != 2 for part in (train_df, calibration_df, test_df)):
+        raise ValueError("Train, calibration, and test periods must each contain both target classes")
 
     # ── 2. Normalise features (z-score, CPU side) ─────────────────────────────
-    # MLX linear layers don't include built-in BatchNorm, so we normalise manually.
-    # Stats computed on full dataset then applied to train/test.
-    mean = X.mean(axis=0)
-    std  = X.std(axis=0) + 1e-8
-    X_norm = (X - mean) / std
-
-    # ── 3. Train/test split (same params as train_model.py) ───────────────────
-    X_train, X_test, y_train, y_test = train_test_split(
-        X_norm, y, test_size=0.2, random_state=SEED, stratify=y
+    # Fit normalization on the training period only to avoid future leakage.
+    X_train_raw = train_df[FEATURES].values.astype(np.float32)
+    X_calibration_raw = calibration_df[FEATURES].values.astype(np.float32)
+    X_test_raw = test_df[FEATURES].values.astype(np.float32)
+    y_train = train_df["target"].values.astype(np.float32)
+    y_calibration = calibration_df["target"].values.astype(np.float32)
+    y_test = test_df["target"].values.astype(np.float32)
+    mean = X_train_raw.mean(axis=0)
+    std = X_train_raw.std(axis=0) + 1e-8
+    X_train = (X_train_raw - mean) / std
+    X_calibration = (X_calibration_raw - mean) / std
+    X_test = (X_test_raw - mean) / std
+    print(
+        f"📊 Train: {len(X_train):,} | Calibration: {len(X_calibration):,} "
+        f"| Test: {len(X_test):,}"
     )
-    print(f"📊 Train: {len(X_train):,} | Test: {len(X_test):,}")
 
     # ── 4. Class imbalance weight (mirrors XGBoost scale_pos_weight) ──────────
     n_neg = int((y_train == 0).sum())
@@ -244,12 +251,12 @@ def train():
         if epoch % 10 == 0 or epoch == 1:
             # Quick validation accuracy (threshold at 0.5)
             model.eval()
-            x_val = mx.array(X_test, dtype=mx.float32)
+            x_val = mx.array(X_calibration, dtype=mx.float32)
             logits_val = model(x_val).squeeze(-1)
             mx.eval(logits_val)
             probs_val = 1 / (1 + np.exp(-np.array(logits_val)))  # sigmoid
             preds_val = (probs_val >= 0.5).astype(int)
-            val_acc   = accuracy_score(y_test, preds_val)
+            val_acc   = accuracy_score(y_calibration, preds_val)
             avg_loss  = np.mean(epoch_losses)
             print(f"  Epoch {epoch:3d}/{EPOCHS} — loss: {avg_loss:.4f} | val_acc: {val_acc:.2%}")
 
@@ -259,11 +266,20 @@ def train():
     # ── 7. Final evaluation ───────────────────────────────────────────────────
     print("\n🧪 Evaluating model on held-out test set...")
     model.eval()
+    x_calibration_mx = mx.array(X_calibration, dtype=mx.float32)
+    logits_calibration = model(x_calibration_mx).squeeze(-1)
+    mx.eval(logits_calibration)
+    raw_calibration_probs = 1 / (1 + np.exp(-np.array(logits_calibration)))
+
     x_test_mx   = mx.array(X_test, dtype=mx.float32)
     logits_test = model(x_test_mx).squeeze(-1)
     mx.eval(logits_test)
 
-    probs = 1 / (1 + np.exp(-np.array(logits_test)))   # sigmoid CPU-side
+    raw_test_probs = 1 / (1 + np.exp(-np.array(logits_test)))   # sigmoid CPU-side
+    calibration = fit_platt_scaling(raw_calibration_probs, y_calibration)
+    probs = np.asarray([apply_platt_scaling(p, calibration) for p in raw_test_probs])
+    if not np.isfinite(probs).all():
+        raise ValueError("Failed to calibrate one or more test probabilities")
     preds = (probs >= 0.5).astype(int)
 
     acc  = accuracy_score(y_test, preds)
@@ -272,6 +288,9 @@ def train():
     print("\n=== Model Performance (MLX MLP) ===")
     print(f"Accuracy:  {acc:.2%}")
     print(f"Precision: {prec:.2%} (When model says BUY, it's right {prec:.2%} of the time)")
+    print(f"Raw Brier score:        {brier_score_loss(y_test, raw_test_probs):.4f}")
+    print(f"Calibrated Brier score: {brier_score_loss(y_test, probs):.4f}")
+    print(f"Calibrated log loss:    {log_loss(y_test, probs):.4f}")
     print("\nClassification Report:")
     print(classification_report(y_test, preds, zero_division=0))
 
@@ -307,6 +326,16 @@ def train():
     with open(CONFIG_PATH, "w") as f:
         json.dump(config, f, indent=2)
     print(f"💾 Config saved  → {CONFIG_PATH}")
+    calibration.update({
+        "model_kind": "mlx",
+        "model_sha256": sha256_file(WEIGHTS_PATH),
+        "feature_names": FEATURES,
+        "test_brier_raw": float(brier_score_loss(y_test, raw_test_probs)),
+        "test_brier_calibrated": float(brier_score_loss(y_test, probs)),
+    })
+    with open(CALIBRATION_PATH, "w") as f:
+        json.dump(calibration, f, indent=2)
+    print(f"💾 Calibration saved → {CALIBRATION_PATH}")
 
     # ── 10. Inference usage hint ──────────────────────────────────────────────
     print("""

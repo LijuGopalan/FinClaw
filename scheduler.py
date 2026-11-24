@@ -231,7 +231,7 @@ def trigger_llm_brief(brief_type: str):
 
         prompt = f"{context}\n\n---\nYOUR TASK:\n{task}"
 
-        response = apply_earnings_guard(ask(prompt, max_tokens=8192), api_data)
+        response = apply_earnings_guard(ask(prompt, max_tokens=8192, task="brief"), api_data)
 
         # Format and send
         header = {

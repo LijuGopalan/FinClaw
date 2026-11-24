@@ -26,6 +26,11 @@ def execute_trade_from_signal(opportunity):
     if score < 70:
         return {"status": "skipped", "reason": f"Score {score} too low for priority alert"}
 
+    risk_gate = opportunity.get("risk_gate")
+    if not isinstance(risk_gate, dict) or risk_gate.get("passed") is not True:
+        vetoes = risk_gate.get("vetoes", ["Risk gate missing"]) if isinstance(risk_gate, dict) else ["Risk gate missing"]
+        return {"status": "skipped", "reason": "; ".join(vetoes)}
+
     ticker = opportunity.get("ticker")
     price = opportunity.get("current_price") or opportunity.get("entry_high")
     if not price:
@@ -34,7 +39,19 @@ def execute_trade_from_signal(opportunity):
     # Mock buying power to give a suggested size
     buying_power = 100000 
     max_pct = config.get("max_position_size_pct", 0.05)
-    trade_size_dollars = buying_power * max_pct
+    try:
+        from skills.volatility_regime import get_current_regime_settings
+    except ImportError:
+        from .volatility_regime import get_current_regime_settings
+    regime = get_current_regime_settings()
+    sizing_multiplier = {
+        "aggressive": 1.0,
+        "normal": 0.75,
+        "defensive": 0.5,
+    }.get(regime.get("position_sizing"), 0.5)
+    cash_allocation_pct = regime.get("cash_allocation_pct", 20)
+    deployable_fraction = (100 - cash_allocation_pct) / 100
+    trade_size_dollars = buying_power * max_pct * sizing_multiplier * deployable_fraction
     
     quantity = int(trade_size_dollars / price)
 
@@ -54,7 +71,11 @@ def execute_trade_from_signal(opportunity):
     alert_msg = f"🔥 HIGH CONVICTION ML SIGNAL 🔥\n\n"
     alert_msg += f"Ticker: {ticker}\n"
     alert_msg += f"Action: BUY LIMIT @ ${price}\n"
-    alert_msg += f"Suggested Quantity: {quantity} shares (Based on 5% sizing)\n"
+    alert_msg += (
+        f"Suggested Quantity: {quantity} shares "
+        f"(regime sizing: {regime.get('position_sizing', 'defensive')}, "
+        f"cash reserve: {cash_allocation_pct}%)\n"
+    )
     alert_msg += f"Stop Loss: ${stop_loss} (Dynamic ATR)\n"
     alert_msg += f"Take Profit: ${take_profit} (2:1 R/R)\n"
     alert_msg += f"ML Score: {score}/100"

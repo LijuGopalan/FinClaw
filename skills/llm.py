@@ -23,7 +23,33 @@ logger = logging.getLogger("finclaw.llm")
 # Local LLM settings (Qwen 2.5 via Ollama)
 USE_LOCAL_LLM = os.getenv("USE_LOCAL_LLM", "true").lower() in ("true", "1", "yes")
 LOCAL_LLM_URL = os.getenv("LOCAL_LLM_URL", "http://127.0.0.1:11434")
-LOCAL_LLM_MODEL = os.getenv("LOCAL_LLM_MODEL", "qwen2.5:7b")
+_LEGACY_LOCAL_LLM_MODEL = os.getenv("LOCAL_LLM_MODEL")
+LOCAL_LLM_MODELS = {
+    "brief": os.getenv("QWEN_FAST_MODEL", "qwen2.5:3b"),
+    "sentiment": os.getenv("QWEN_FAST_MODEL", "qwen2.5:3b"),
+    "regime": os.getenv("QWEN_REGIME_MODEL", os.getenv("QWEN_FAST_MODEL", "qwen2.5:3b")),
+    "analysis": os.getenv("QWEN_ANALYSIS_MODEL", _LEGACY_LOCAL_LLM_MODEL or "qwen2.5:7b"),
+    "risk": os.getenv("QWEN_RISK_MODEL", _LEGACY_LOCAL_LLM_MODEL or "qwen2.5:7b"),
+    "research": os.getenv("QWEN_RESEARCH_MODEL", _LEGACY_LOCAL_LLM_MODEL or "qwen2.5:7b"),
+    "journal": os.getenv("QWEN_ANALYSIS_MODEL", _LEGACY_LOCAL_LLM_MODEL or "qwen2.5:7b"),
+}
+if _LEGACY_LOCAL_LLM_MODEL:
+    LOCAL_LLM_MODELS = {
+        task: os.getenv(
+            {
+                "brief": "QWEN_FAST_MODEL",
+                "sentiment": "QWEN_FAST_MODEL",
+                "regime": "QWEN_REGIME_MODEL",
+                "analysis": "QWEN_ANALYSIS_MODEL",
+                "risk": "QWEN_RISK_MODEL",
+                "research": "QWEN_RESEARCH_MODEL",
+                "journal": "QWEN_ANALYSIS_MODEL",
+            }[task],
+            LOCAL_LLM_MODELS[task],
+        )
+        for task in LOCAL_LLM_MODELS
+    }
+LOCAL_LLM_MODEL = _LEGACY_LOCAL_LLM_MODEL or LOCAL_LLM_MODELS["analysis"]
 
 # Cloud Gemini settings
 _API_KEY = os.getenv("GOOGLE_API_KEY")
@@ -300,15 +326,22 @@ def _sentence_claims_earnings_today(sentence: str, reporting: set, known: set) -
     return True
 
 
-def _ask_local_qwen(prompt: str, system: str, max_tokens: int):
+def _ask_local_qwen(
+    prompt: str,
+    system: str,
+    max_tokens: int,
+    task: str = "analysis",
+    response_schema=None,
+):
     """Query local Qwen 2.5 model via Ollama running on Apple Silicon."""
     if not USE_LOCAL_LLM:
         return None
     try:
+        model = LOCAL_LLM_MODELS.get(task) or LOCAL_LLM_MODELS.get("analysis") or LOCAL_LLM_MODEL
         # Increase token limit to 4096 for market briefs and research reports
         local_predict = min(max_tokens, 4096) if max_tokens else 2048
         payload = {
-            "model": LOCAL_LLM_MODEL,
+            "model": model,
             "messages": [
                 {"role": "system", "content": system},
                 {"role": "user", "content": prompt}
@@ -319,6 +352,8 @@ def _ask_local_qwen(prompt: str, system: str, max_tokens: int):
                 "num_predict": local_predict
             }
         }
+        if response_schema:
+            payload["format"] = response_schema
         resp = requests.post(
             f"{LOCAL_LLM_URL}/api/chat",
             json=payload,
@@ -327,7 +362,7 @@ def _ask_local_qwen(prompt: str, system: str, max_tokens: int):
         if resp.status_code == 200:
             content = resp.json().get("message", {}).get("content", "").strip()
             if content:
-                logger.info(f"Generated response using Local Model: {LOCAL_LLM_MODEL}")
+                logger.info("Generated response using Local Model: %s (task=%s)", model, task)
                 return content
         logger.warning(f"Local Ollama returned status {resp.status_code}: {resp.text[:100]}")
     except Exception as e:
@@ -370,7 +405,7 @@ def _extract_gemini_text(response):
     return None
 
 
-def _ask_gemini(prompt: str, system: str, max_tokens: int) -> str:
+def _ask_gemini(prompt: str, system: str, max_tokens: int, response_schema=None) -> str:
     """Query Google Gemini Flash cloud model."""
     if not client:
         return "⚠️ Cloud LLM not configured — set GOOGLE_API_KEY in .env"
@@ -380,15 +415,19 @@ def _ask_gemini(prompt: str, system: str, max_tokens: int) -> str:
     last_error = None
     for attempt in range(1, _MAX_RETRIES + 1):
         try:
+            config = {
+                "system_instruction": system,
+                "max_output_tokens": max_tokens,
+                "temperature": 0.15,
+                "http_options": types.HttpOptions(timeout=_REQUEST_TIMEOUT * 1000),
+            }
+            if response_schema:
+                config["response_mime_type"] = "application/json"
+                config["response_schema"] = response_schema
             response = client.models.generate_content(
                 model=_MODEL_NAME,
                 contents=prompt,
-                config=types.GenerateContentConfig(
-                    system_instruction=system,
-                    max_output_tokens=max_tokens,
-                    temperature=0.15,
-                    http_options=types.HttpOptions(timeout=_REQUEST_TIMEOUT * 1000),
-                ),
+                config=types.GenerateContentConfig(**config),
             )
             text = _extract_gemini_text(response)
             if text is not None:
@@ -416,7 +455,13 @@ def _ask_gemini(prompt: str, system: str, max_tokens: int) -> str:
     return f"⚠️ LLM temporarily unavailable ({last_error})"
 
 
-def ask(prompt: str, system: str = None, max_tokens: int = 8192) -> str:
+def ask(
+    prompt: str,
+    system: str = None,
+    max_tokens: int = 8192,
+    task: str = "analysis",
+    response_schema=None,
+) -> str:
     """
     Send a prompt to the AI layer.
     Tries Local Qwen 2.5 first (100% private on Apple M4),
@@ -429,12 +474,29 @@ def ask(prompt: str, system: str = None, max_tokens: int = 8192) -> str:
     sys_prompt = system or SOUL_PROMPT
 
     # 1. Try local Qwen 2.5 via Ollama
-    local_response = _ask_local_qwen(prompt, sys_prompt, max_tokens)
+    local_response = _ask_local_qwen(prompt, sys_prompt, max_tokens, task, response_schema)
     if local_response:
         return local_response
 
     # 2. Resilient Cloud Fallback (Gemini)
-    return _ask_gemini(prompt, sys_prompt, max_tokens)
+    return _ask_gemini(prompt, sys_prompt, max_tokens, response_schema)
+
+
+def ask_json(prompt: str, schema: dict, system: str = None, max_tokens: int = 2048, task: str = "analysis") -> dict:
+    """Request schema-constrained JSON from a model and reject non-JSON responses."""
+    import json
+
+    response = ask(
+        prompt,
+        system=system,
+        max_tokens=max_tokens,
+        task=task,
+        response_schema=schema,
+    )
+    result = json.loads(response)
+    if not isinstance(result, dict):
+        raise ValueError("Expected the model to return a JSON object")
+    return result
 
 
 def build_market_context(api_data: dict) -> str:

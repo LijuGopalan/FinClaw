@@ -264,7 +264,7 @@ Analyze this smart money activity and provide:
 Keep it under 400 words. Be sharp and actionable."""
 
     try:
-        analysis = ask(prompt, max_tokens=2048)
+        analysis = ask(prompt, max_tokens=2048, task="research")
         
         # Save report
         reports_dir = os.path.join(os.path.dirname(__file__), "..", "data", "smart_money_reports")

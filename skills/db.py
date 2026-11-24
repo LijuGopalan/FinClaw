@@ -55,7 +55,22 @@ def init_db():
                 outcome_price REAL,
                 outcome_return_pct REAL,
                 created_at TEXT DEFAULT (datetime('now')),
-                resolved_at TEXT
+                resolved_at TEXT,
+                source TEXT DEFAULT 'manual',
+                scan_id INTEGER,
+                signal_key TEXT,
+                evidence_json JSON,
+                risk_gate_json JSON,
+                inference TEXT,
+                recommendation TEXT,
+                model_probability REAL,
+                model_calibration TEXT,
+                regime TEXT,
+                entry_filled INTEGER,
+                fill_price REAL,
+                fees REAL,
+                slippage REAL,
+                outcome_method TEXT
             );
 
             -- Daily scan results
@@ -104,6 +119,17 @@ def init_db():
                 created_at TEXT DEFAULT (datetime('now'))
             );
 
+            CREATE TABLE IF NOT EXISTS signal_observations (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                signal_id INTEGER NOT NULL REFERENCES signals(id),
+                observed_at TEXT NOT NULL,
+                observed_price REAL NOT NULL,
+                outcome TEXT,
+                outcome_return_pct REAL,
+                outcome_method TEXT NOT NULL,
+                UNIQUE(signal_id, observed_at)
+            );
+
             -- Indexes for common queries
             CREATE INDEX IF NOT EXISTS idx_signals_ticker ON signals(ticker);
             CREATE INDEX IF NOT EXISTS idx_signals_created ON signals(created_at);
@@ -111,7 +137,33 @@ def init_db():
             CREATE INDEX IF NOT EXISTS idx_options_created ON options_flow(created_at);
             CREATE INDEX IF NOT EXISTS idx_snapshots_created ON portfolio_snapshots(created_at);
             CREATE INDEX IF NOT EXISTS idx_alerts_created ON alerts(created_at);
+            CREATE INDEX IF NOT EXISTS idx_signal_observations_signal ON signal_observations(signal_id, observed_at);
         """)
+        existing = {row["name"] for row in conn.execute("PRAGMA table_info(signals)")}
+        migrations = {
+            "source": "TEXT DEFAULT 'manual'",
+            "scan_id": "INTEGER",
+            "signal_key": "TEXT",
+            "evidence_json": "JSON",
+            "risk_gate_json": "JSON",
+            "inference": "TEXT",
+            "recommendation": "TEXT",
+            "model_probability": "REAL",
+            "model_calibration": "TEXT",
+            "regime": "TEXT",
+            "entry_filled": "INTEGER",
+            "fill_price": "REAL",
+            "fees": "REAL",
+            "slippage": "REAL",
+            "outcome_method": "TEXT",
+        }
+        for column, column_type in migrations.items():
+            if column not in existing:
+                conn.execute(f"ALTER TABLE signals ADD COLUMN {column} {column_type}")
+        conn.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_signals_signal_key "
+            "ON signals(signal_key) WHERE signal_key IS NOT NULL"
+        )
 
 
 # ============================================================
@@ -119,26 +171,51 @@ def init_db():
 # ============================================================
 def save_signal(ticker, action, horizon, confidence, entry_low=None,
                 entry_high=None, target_price=None, stop_loss=None,
-                thesis=None, price_at_signal=None):
+                thesis=None, price_at_signal=None, source="manual",
+                scan_id=None, signal_key=None, evidence=None, risk_gate=None,
+                inference=None, recommendation=None, model_probability=None,
+                model_calibration=None, regime=None, entry_filled=None,
+                fill_price=None, fees=None, slippage=None, outcome_method=None):
     """Save an AI-generated signal."""
     with get_db() as conn:
-        conn.execute("""
+        cursor = conn.execute("""
             INSERT INTO signals (ticker, action, horizon, confidence,
-                entry_low, entry_high, target_price, stop_loss,
-                thesis, price_at_signal)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """, (ticker, action, horizon, confidence, entry_low, entry_high,
-              target_price, stop_loss, thesis, price_at_signal))
+                entry_low, entry_high, target_price, stop_loss, thesis,
+                price_at_signal, source, scan_id, signal_key, evidence_json,
+                risk_gate_json, inference, recommendation, model_probability,
+                model_calibration, regime, entry_filled, fill_price, fees,
+                slippage, outcome_method)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, (
+            ticker, action, horizon, confidence, entry_low, entry_high,
+            target_price, stop_loss, thesis, price_at_signal, source, scan_id,
+            signal_key, json.dumps(evidence, default=str) if evidence is not None else None,
+            json.dumps(risk_gate, default=str) if risk_gate is not None else None,
+            inference, recommendation, model_probability, model_calibration,
+            regime, entry_filled, fill_price, fees, slippage, outcome_method,
+        ))
+        return cursor.lastrowid
 
 
-def resolve_signal(signal_id, outcome, outcome_price, outcome_return_pct):
-    """Mark a signal as resolved (WIN/LOSS/EXPIRED)."""
+def resolve_signal(
+    signal_id, outcome, outcome_price, outcome_return_pct,
+    entry_filled=None, fill_price=None, fees=None, slippage=None, outcome_method=None,
+):
+    """Resolve a signal and optionally record verified fill and transaction details."""
     with get_db() as conn:
         conn.execute("""
             UPDATE signals SET outcome=?, outcome_price=?,
-                outcome_return_pct=?, resolved_at=datetime('now')
+                outcome_return_pct=?, resolved_at=datetime('now'),
+                entry_filled=COALESCE(?, entry_filled),
+                fill_price=COALESCE(?, fill_price),
+                fees=COALESCE(?, fees),
+                slippage=COALESCE(?, slippage),
+                outcome_method=COALESCE(?, outcome_method)
             WHERE id=?
-        """, (outcome, outcome_price, outcome_return_pct, signal_id))
+        """, (
+            outcome, outcome_price, outcome_return_pct, entry_filled, fill_price,
+            fees, slippage, outcome_method, signal_id,
+        ))
 
 
 def get_signals(ticker=None, limit=50, include_resolved=True):
@@ -162,7 +239,32 @@ def get_signals(ticker=None, limit=50, include_resolved=True):
         params.append(limit)
 
         rows = conn.execute(query, params).fetchall()
-        return [dict(r) for r in rows]
+        results = [dict(r) for r in rows]
+        for row in results:
+            for key in ("evidence_json", "risk_gate_json"):
+                if row.get(key):
+                    try:
+                        row[key] = json.loads(row[key])
+                    except (TypeError, json.JSONDecodeError):
+                        row[key] = None
+        return results
+
+
+def record_signal_observation(
+    signal_id, observed_price, outcome=None, outcome_return_pct=None,
+    outcome_method="mark_to_market",
+):
+    """Persist a timestamped mark-to-market observation without calling it a fill."""
+    observed_at = datetime.utcnow().isoformat()
+    with get_db() as conn:
+        conn.execute(
+            """
+            INSERT OR IGNORE INTO signal_observations
+                (signal_id, observed_at, observed_price, outcome, outcome_return_pct, outcome_method)
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (signal_id, observed_at, observed_price, outcome, outcome_return_pct, outcome_method),
+        )
 
 
 def get_signal_performance():
@@ -298,12 +400,84 @@ def acknowledge_alert(alert_id):
 # SCAN HISTORY
 # ============================================================
 def save_scan(scan_type, data):
-    """Save scan results."""
+    """Persist scan results and an immutable signal snapshot for each opportunity."""
+    if not isinstance(data, dict):
+        raise ValueError("Scan data must be a dictionary")
     with get_db() as conn:
-        conn.execute("""
+        cursor = conn.execute("""
             INSERT INTO scan_history (scan_type, data)
             VALUES (?, ?)
         """, (scan_type, json.dumps(data, default=str)))
+        scan_id = cursor.lastrowid
+
+        container = data
+        if not isinstance(container.get("opportunities"), list):
+            container = data.get("scan_result") or {}
+        opportunities = container.get("opportunities", [])
+        generated_at = (
+            container.get("generated_at")
+            or data.get("timestamp")
+            or datetime.utcnow().isoformat()
+        )
+        for opportunity in opportunities:
+            ticker = str(opportunity.get("ticker") or "").upper().strip()
+            if not ticker:
+                continue
+            signal_key = f"{scan_type}:{generated_at}:{ticker}"
+            evidence = opportunity.get("evidence") or {
+                key: opportunity.get(key)
+                for key in (
+                    "price", "change_pct", "volume_ratio", "rsi", "macd_histogram",
+                    "atr", "support", "resistance", "reasons", "risk_flags",
+                    "source", "source_notes", "timestamp",
+                )
+                if key in opportunity
+            }
+            risk_gate = opportunity.get("risk_gate")
+            values = (
+                ticker,
+                opportunity.get("action", "WATCH"),
+                opportunity.get("horizon", container.get("horizon")),
+                opportunity.get("score"),
+                opportunity.get("entry_low"),
+                opportunity.get("entry_high"),
+                opportunity.get("target_price"),
+                opportunity.get("stop_loss"),
+                opportunity.get("thesis"),
+                opportunity.get("price"),
+                "opportunity_scan",
+                scan_id,
+                signal_key,
+                json.dumps(evidence, default=str),
+                json.dumps(risk_gate, default=str) if risk_gate is not None else None,
+                opportunity.get("inference", opportunity.get("thesis")),
+                opportunity.get("action"),
+                opportunity.get("ml_probability"),
+                "platt" if opportunity.get("ml_probability") is not None else None,
+                (container.get("regime_settings") or {}).get("regime"),
+            )
+            conn.execute(
+                """
+                INSERT OR IGNORE INTO signals (
+                    ticker, action, horizon, confidence, entry_low, entry_high,
+                    target_price, stop_loss, thesis, price_at_signal, source,
+                    scan_id, signal_key, evidence_json, risk_gate_json, inference,
+                    recommendation, model_probability, model_calibration, regime
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                values,
+            )
+            signal = conn.execute(
+                "SELECT id FROM signals WHERE signal_key=?", (signal_key,)
+            ).fetchone()
+            if signal:
+                opportunity["signal_id"] = signal["id"]
+
+        conn.execute(
+            "UPDATE scan_history SET data=? WHERE id=?",
+            (json.dumps(data, default=str), scan_id),
+        )
+        return scan_id
 
 
 def get_scan_history(scan_type=None, days=7, limit=20):
