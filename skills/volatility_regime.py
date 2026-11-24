@@ -8,8 +8,9 @@ import os
 import sys
 import json
 import logging
-from datetime import datetime, timedelta
+from datetime import datetime
 import numpy as np
+import pandas as pd
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
@@ -21,9 +22,93 @@ except ImportError:
     def get_price_history(ticker, **kwargs):
         return None
 
-from skills.llm import ask
+from skills.llm import ask_json
 
 logger = logging.getLogger("finclaw.volatility")
+REGIME_FILE = os.path.join(os.path.dirname(__file__), "..", "data", "current_regime.json")
+
+_REGIME_SCHEMA = {
+    "type": "object",
+    "additionalProperties": False,
+    "required": [
+        "regime", "regime_changed", "position_sizing", "preferred_timeframe",
+        "stop_loss_multiplier", "cash_allocation_pct", "min_opportunity_score",
+        "universe_limit", "strategy_summary", "reasoning",
+    ],
+    "properties": {
+        "regime": {"type": "string", "enum": ["low_vol", "normal", "high_vol", "extreme"]},
+        "regime_changed": {"type": "boolean"},
+        "position_sizing": {"type": "string", "enum": ["aggressive", "normal", "defensive"]},
+        "preferred_timeframe": {"type": "string", "enum": ["auto", "scalp", "swing", "long"]},
+        "stop_loss_multiplier": {"type": "number", "minimum": 1.0, "maximum": 2.0},
+        "cash_allocation_pct": {"type": "integer", "minimum": 0, "maximum": 50},
+        "min_opportunity_score": {"type": "integer", "minimum": 50, "maximum": 80},
+        "universe_limit": {"type": "integer", "minimum": 20, "maximum": 80},
+        "strategy_summary": {"type": "string"},
+        "reasoning": {"type": "string"},
+    },
+}
+
+
+def _default_regime_settings():
+    return {
+        "regime": "normal",
+        "regime_changed": False,
+        "position_sizing": "normal",
+        "preferred_timeframe": "auto",
+        "stop_loss_multiplier": 1.0,
+        "cash_allocation_pct": 20,
+        "min_opportunity_score": 58,
+        "universe_limit": 40,
+        "strategy_summary": "",
+        "reasoning": "",
+    }
+
+
+def _validate_regime_settings(data):
+    """Validate model and persisted settings against deterministic limits."""
+    if not isinstance(data, dict):
+        raise ValueError("Regime settings must be a JSON object")
+    defaults = _default_regime_settings()
+    result = {}
+    for key, default in defaults.items():
+        value = data.get(key, default)
+        if key == "regime":
+            value = {
+                "ultra_low": "low_vol",
+                "low": "low_vol",
+                "neutral": "normal",
+                "high": "high_vol",
+            }.get(value, value)
+            valid = {"low_vol", "normal", "high_vol", "extreme"}
+        elif key == "position_sizing":
+            valid = {"aggressive", "normal", "defensive"}
+        elif key == "preferred_timeframe":
+            valid = {"auto", "scalp", "swing", "long"}
+        else:
+            valid = None
+        if valid is not None:
+            if not isinstance(value, str) or value not in valid:
+                raise ValueError(f"Invalid regime setting {key}: {value!r}")
+        elif key == "regime_changed":
+            if not isinstance(value, bool):
+                raise ValueError("regime_changed must be a boolean")
+        elif key == "stop_loss_multiplier":
+            if isinstance(value, bool) or not isinstance(value, (int, float)) or not 1.0 <= value <= 2.0:
+                raise ValueError("stop_loss_multiplier must be between 1.0 and 2.0")
+            value = float(value)
+        elif key in ("cash_allocation_pct", "min_opportunity_score", "universe_limit"):
+            bounds = {
+                "cash_allocation_pct": (0, 50),
+                "min_opportunity_score": (50, 80),
+                "universe_limit": (20, 80),
+            }[key]
+            if isinstance(value, bool) or not isinstance(value, int) or not bounds[0] <= value <= bounds[1]:
+                raise ValueError(f"{key} must be an integer between {bounds[0]} and {bounds[1]}")
+        elif not isinstance(value, str):
+            raise ValueError(f"{key} must be a string")
+        result[key] = value
+    return result
 
 
 def calculate_vix_regime():
@@ -170,15 +255,8 @@ def detect_volatility_regime():
     qqq_atr = calculate_atr_regime("QQQ")
     
     # Load current regime from file
-    regime_file = os.path.join(
-        os.path.dirname(__file__), "..", "data", "current_regime.json"
-    )
-    
-    try:
-        with open(regime_file, 'r') as f:
-            previous_regime = json.load(f)
-    except:
-        previous_regime = {"regime": "unknown"}
+    regime_file = REGIME_FILE
+    previous_regime = get_current_regime_settings()
     
     # Build context
     context = f"""# Volatility Regime Analysis
@@ -208,83 +286,41 @@ def detect_volatility_regime():
     if qqq_atr:
         context += f"- QQQ ATR: {qqq_atr['current_atr']:.2f} ({qqq_atr['regime'].replace('_', ' ').title()})\n"
     
-    context += f"\n## Previous Regime\n"
+    context += "\n## Previous Regime\n"
     context += f"- {previous_regime.get('regime', 'Unknown').replace('_', ' ').title()}\n"
     
     # Ask Qwen to analyze and recommend strategy
     prompt = f"""{context}
 
-YOUR TASK:
-Analyze the volatility regime and provide:
-
-1. **Current Regime Classification**
-   - What is the overall market regime? (Low Vol / Normal / High Vol / Extreme)
-   - Has the regime changed from before?
-
-2. **Trading Strategy Adjustments**
-   - Position sizing (increase/decrease/maintain)
-   - Preferred timeframes (scalp/swing/position)
-   - Risk management rules
-   - Stop-loss widths (tighter/wider than normal)
-
-3. **Sector/Style Preferences**
-   - Growth vs. Value
-   - Large cap vs. Small cap
-   - Sector rotation to favor
-
-4. **Specific Actions**
-   - Raise cash? (what %)
-   - Reduce leverage?
-   - Focus on defensive stocks?
-   - Opportunity to be aggressive?
-
-5. **Alert Thresholds**
-   - Should we raise/lower opportunity score thresholds?
-   - Adjust universe_limit for scans?
-   - Change min_score requirements?
-
-Return your analysis in this JSON format (ONLY JSON, no markdown):
-{{
-  "regime": "low_vol" | "normal" | "high_vol" | "extreme",
-  "regime_changed": true | false,
-  "position_sizing": "aggressive" | "normal" | "defensive",
-  "preferred_timeframe": "scalp" | "swing" | "long",
-  "stop_loss_multiplier": 1.0-2.0,
-  "cash_allocation_pct": 0-50,
-  "min_opportunity_score": 50-80,
-  "universe_limit": 20-80,
-  "strategy_summary": "<2-3 sentence summary>",
-  "reasoning": "<brief explanation>"
-}}"""
+Classify the current market regime using only the supplied observations. Choose conservative,
+bounded scan and risk settings. These settings are advisory inputs to deterministic FinClaw
+limits; never recommend removing a limit. Return only an object matching the supplied schema.
+"""
 
     try:
-        response = ask(prompt, max_tokens=1024)
-        
-        # Parse JSON response
-        response = response.strip()
-        if response.startswith("```"):
-            lines = response.split('\n')
-            response = '\n'.join([l for l in lines if not l.startswith('```')])
-        
-        regime_data = json.loads(response.strip())
-        
-        # Add metadata
+        regime_data = ask_json(
+            prompt,
+            schema=_REGIME_SCHEMA,
+            max_tokens=1024,
+            task="regime",
+        )
+        regime_data = _validate_regime_settings(regime_data)
+        regime_data["regime_changed"] = regime_data["regime"] != previous_regime.get("regime")
         regime_data["timestamp"] = datetime.now().isoformat()
-        regime_data["vix_level"] = vix_regime.get('vix_level') if vix_regime else None
-        regime_data["market_breadth"] = breadth.get('breadth') if breadth else None
-        
-        # Save current regime
-        with open(regime_file, 'w') as f:
+        regime_data["vix_level"] = vix_regime.get("vix_level") if vix_regime else None
+        regime_data["market_breadth"] = breadth.get("breadth") if breadth else None
+
+        with open(regime_file, "w") as f:
             json.dump(regime_data, f, indent=2)
-        
-        # Check if regime changed
-        if regime_data.get('regime_changed'):
-            # Return alert message
-            summary = regime_data.get('strategy_summary', '')
-            return f"""⚠️ <b>Volatility Regime Change Detected</b>
+
+        if not regime_data["regime_changed"]:
+            return None
+
+        vix_text = f"{vix_regime['vix_level']:.2f}" if vix_regime else "unavailable"
+        return f"""⚠️ <b>Volatility Regime Change Detected</b>
 
 <b>New Regime:</b> {regime_data['regime'].replace('_', ' ').title()}
-<b>VIX:</b> {vix_regime['vix_level']:.2f}
+<b>VIX:</b> {vix_text}
 
 <b>Strategy Adjustments:</b>
 - Position Sizing: {regime_data['position_sizing'].title()}
@@ -292,49 +328,38 @@ Return your analysis in this JSON format (ONLY JSON, no markdown):
 - Cash Allocation: {regime_data['cash_allocation_pct']}%
 - Min Score: {regime_data['min_opportunity_score']}
 
-{summary}
+{regime_data['strategy_summary']}
 
-<i>{regime_data.get('reasoning', '')}</i>"""
-        
-        return None  # No alert if regime unchanged
-        
-    except json.JSONDecodeError as e:
-        logger.error(f"Failed to parse regime JSON: {response}")
-        # Save raw analysis anyway
-        regime_data = {
-            "regime": vix_regime.get('regime') if vix_regime else "unknown",
-            "timestamp": datetime.now().isoformat(),
-            "raw_analysis": response
-        }
-        with open(regime_file, 'w') as f:
-            json.dump(regime_data, f, indent=2)
-        return None
-        
+<i>{regime_data['reasoning']}</i>"""
+
     except Exception as e:
-        logger.error(f"Failed to detect regime: {e}")
+        logger.error("Failed to generate valid volatility regime settings: %s", e)
         return None
 
 
 def get_current_regime_settings():
     """
-    Get current regime settings for use by opportunity engine
+    Get validated current regime settings for use by opportunity and execution engines.
     """
-    regime_file = os.path.join(
-        os.path.dirname(__file__), "..", "data", "current_regime.json"
-    )
-    
     try:
-        with open(regime_file, 'r') as f:
-            return json.load(f)
-    except:
-        # Return default settings
-        return {
-            "regime": "normal",
-            "position_sizing": "normal",
-            "min_opportunity_score": 58,
-            "universe_limit": 40,
-            "stop_loss_multiplier": 1.0
-        }
+        with open(REGIME_FILE, 'r') as f:
+            data = json.load(f)
+        settings = _validate_regime_settings(data)
+        timestamp = data.get("timestamp")
+        if not timestamp:
+            raise ValueError("Regime settings have no timestamp")
+        updated_at = datetime.fromisoformat(str(timestamp).replace("Z", "+00:00"))
+        now = datetime.now(updated_at.tzinfo) if updated_at.tzinfo else datetime.now()
+        age_seconds = (now - updated_at).total_seconds()
+        if age_seconds < -300 or age_seconds > 24 * 60 * 60:
+            raise ValueError("Regime settings are stale or have a future timestamp")
+        for key in ("timestamp", "vix_level", "market_breadth"):
+            if key in data:
+                settings[key] = data[key]
+        return settings
+    except (OSError, ValueError, json.JSONDecodeError) as e:
+        logger.warning("Using default regime settings: %s", e)
+        return _default_regime_settings()
 
 
 if __name__ == "__main__":

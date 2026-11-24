@@ -20,7 +20,7 @@ except ImportError as e:
     def get_news(ticker, limit=3):
         return {"articles": []}
 
-from skills.llm import ask
+from skills.llm import ask_json
 try:
     from skills.db import get_db
 except ImportError:
@@ -51,56 +51,42 @@ DESCRIPTION: {description}
 
 Classify the sentiment and provide a risk score.
 
-Return ONLY a valid JSON object (no markdown, no extra text) with this exact structure:
-{{
-  "sentiment": "bullish" OR "bearish" OR "neutral",
-  "score": <number from 0-100>,
-  "reasoning": "<brief 1-sentence explanation>",
-  "headline_risk": "low" OR "medium" OR "high"
-}}
-
 Rules:
 - bullish: positive catalysts (earnings beat, product launch, upgrade, partnership)
 - bearish: negative catalysts (earnings miss, lawsuit, downgrade, regulatory issues)
 - neutral: routine updates with no clear direction
 - score: 0=extremely bearish, 50=neutral, 100=extremely bullish
 - headline_risk: probability this moves stock significantly (low=<1%, medium=1-3%, high=>3%)
-
-JSON response:"""
-
+"""
+    schema = {
+        "type": "object",
+        "additionalProperties": False,
+        "required": ["sentiment", "score", "reasoning", "headline_risk"],
+        "properties": {
+            "sentiment": {"type": "string", "enum": ["bullish", "bearish", "neutral"]},
+            "score": {"type": "integer", "minimum": 0, "maximum": 100},
+            "reasoning": {"type": "string"},
+            "headline_risk": {"type": "string", "enum": ["low", "medium", "high"]},
+        },
+    }
     try:
-        response = ask(prompt, max_tokens=256)
-        
-        # Extract JSON from response (remove markdown code blocks if present)
-        response = response.strip()
-        if response.startswith("```"):
-            lines = response.split('\n')
-            response = '\n'.join([l for l in lines if not l.startswith('```')])
-        
-        # Parse JSON
-        sentiment_data = json.loads(response.strip())
-        
-        # Validate required fields
-        required_fields = ['sentiment', 'score', 'reasoning', 'headline_risk']
-        if not all(field in sentiment_data for field in required_fields):
-            raise ValueError("Missing required fields in response")
-        
+        sentiment_data = ask_json(prompt, schema=schema, max_tokens=256, task="sentiment")
+        if (
+            sentiment_data["sentiment"] not in {"bullish", "bearish", "neutral"}
+            or sentiment_data["headline_risk"] not in {"low", "medium", "high"}
+            or isinstance(sentiment_data["score"], bool)
+            or not isinstance(sentiment_data["score"], int)
+            or not 0 <= sentiment_data["score"] <= 100
+            or not isinstance(sentiment_data["reasoning"], str)
+        ):
+            raise ValueError("Model returned invalid sentiment fields")
         return sentiment_data
-        
-    except json.JSONDecodeError as e:
-        logger.error(f"Failed to parse JSON response: {response}")
-        return {
-            "sentiment": "neutral",
-            "score": 50,
-            "reasoning": "Failed to analyze - parsing error",
-            "headline_risk": "low"
-        }
     except Exception as e:
         logger.error(f"Sentiment analysis failed: {e}")
         return {
             "sentiment": "neutral",
             "score": 50,
-            "reasoning": f"Analysis error: {str(e)}",
+            "reasoning": "Failed to analyze - structured response was invalid",
             "headline_risk": "low"
         }
 

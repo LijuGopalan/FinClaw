@@ -1,6 +1,7 @@
-from datetime import datetime
+from datetime import datetime, timezone
 
 from skills import opportunity_engine as oe
+from skills import volatility_regime as vr
 
 
 def test_detect_market_session_boundaries():
@@ -20,6 +21,7 @@ def test_score_ticker_opportunity_combines_catalysts(monkeypatch):
         "volume": 3_000_000,
         "avg_volume": 1_000_000,
         "source": "test quote",
+        "timestamp": datetime.now(timezone.utc).isoformat(),
     })
     monkeypatch.setattr(oe, "get_technical_analysis", lambda ticker: {
         "ticker": ticker,
@@ -75,6 +77,7 @@ def test_score_ticker_opportunity_combines_catalysts(monkeypatch):
     assert result["target_price"] > result["price"]
     assert result["stop_loss"] < result["price"]
     assert result["risk_reward"] is not None
+    assert result["risk_gate"]["passed"] is True
     assert "Upgrade" in result["catalyst_flags"]
     assert "Net insider buying" in result["smart_money_flags"]
 
@@ -84,7 +87,7 @@ def test_get_opportunities_ranks_and_limits(monkeypatch):
 
     scores = {"AAA": 40, "BBB": 82, "CCC": 65}
 
-    def fake_score(ticker, session="auto", horizon="auto", include_options=True):
+    def fake_score(ticker, session="auto", horizon="auto", include_options=True, **kwargs):
         return {
             "ticker": ticker,
             "score": scores[ticker],
@@ -127,3 +130,63 @@ def test_build_opportunity_brief_handles_empty_and_ranked_results():
     assert "AAA" in brief
     assert "score 66" in brief
     assert "Not financial advice" in brief
+
+
+def test_risk_gate_vetoes_stale_and_unofficial_intraday_quotes():
+    fresh_quote = {
+        "source": "Schwab",
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+    }
+    assert oe.evaluate_risk_gate(
+        fresh_quote, 100, 99, 101, 105, 95, 2.0, "swing"
+    )["passed"]
+
+    stale_quote = {
+        "source": "Schwab",
+        "timestamp": "2020-01-01T00:00:00+00:00",
+    }
+    stale_gate = oe.evaluate_risk_gate(
+        stale_quote, 100, 99, 101, 105, 95, 2.0, "swing"
+    )
+    assert stale_gate["passed"] is False
+    assert "Market quote is stale" in stale_gate["vetoes"][0]
+
+    delayed_quote = {
+        "source": "yfinance (unofficial)",
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+    }
+    delayed_gate = oe.evaluate_risk_gate(
+        delayed_quote, 100, 99, 101, 105, 95, 2.0, "scalp"
+    )
+    assert delayed_gate["passed"] is False
+    assert any("not eligible for intraday" in veto for veto in delayed_gate["vetoes"])
+
+
+def test_get_opportunities_applies_validated_regime_settings(monkeypatch):
+    settings = {
+        "regime": "high_vol",
+        "position_sizing": "defensive",
+        "preferred_timeframe": "long",
+        "stop_loss_multiplier": 1.5,
+        "cash_allocation_pct": 35,
+        "min_opportunity_score": 68,
+        "universe_limit": 20,
+    }
+    monkeypatch.setattr(vr, "get_current_regime_settings", lambda: settings)
+    monkeypatch.setattr(oe, "load_opportunity_watchlist", lambda limit=80: ["AAA", "BBB"])
+    monkeypatch.setattr(oe, "get_smart_money_watchlist", lambda: [])
+    received = {}
+
+    def fake_score(ticker, session, horizon, include_options, stop_loss_multiplier):
+        received.update({
+            "horizon": horizon,
+            "stop_loss_multiplier": stop_loss_multiplier,
+        })
+        return {"ticker": ticker, "score": 70, "price": 100}
+
+    monkeypatch.setattr(oe, "score_ticker_opportunity", fake_score)
+    result = oe.get_opportunities(session="regular", horizon="auto", limit=10)
+
+    assert received == {"horizon": "long", "stop_loss_multiplier": 1.5}
+    assert len(result["opportunities"]) == 2
+    assert result["regime_settings"]["regime"] == "high_vol"

@@ -15,7 +15,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 try:
     from skills.financial_skills import get_stock_quote, get_price_history
-    from skills.db import get_scan_history
+    from skills.db import get_scan_history, record_signal_observation
 except ImportError:
     def get_stock_quote(ticker):
         return {}
@@ -23,6 +23,8 @@ except ImportError:
         return None
     def get_scan_history(**kwargs):
         return []
+    def record_signal_observation(*args, **kwargs):
+        return None
 
 from skills.llm import ask
 
@@ -74,21 +76,17 @@ def analyze_signal_performance(scan_data: dict):
             # Calculate performance
             price_change_pct = ((current_price - entry_mid) / entry_mid) * 100
             
-            # Determine outcome
-            outcome = "unknown"
+            # A quote is only a mark-to-market observation; without a recorded fill,
+            # it must not be reported as a realized win or loss.
+            outcome = "open"
             if 'buy' in action.lower():
                 if target and current_price >= target:
-                    outcome = "target_hit"
+                    outcome = "price_above_target"
                 elif stop and current_price <= stop:
-                    outcome = "stopped_out"
-                elif price_change_pct > 2:
-                    outcome = "winning"
-                elif price_change_pct < -2:
-                    outcome = "losing"
-                else:
-                    outcome = "pending"
+                    outcome = "price_below_stop"
             
             results.append({
+                "signal_id": opp.get("signal_id"),
                 "ticker": ticker,
                 "action": action,
                 "score": score,
@@ -98,7 +96,11 @@ def analyze_signal_performance(scan_data: dict):
                 "target": target,
                 "stop": stop,
                 "outcome": outcome,
-                "scan_time": scan_time
+                "scan_time": scan_time,
+                "outcome_method": "mark_to_market_no_fill_data",
+                "ml_probability": opp.get("ml_probability"),
+                "risk_gate": opp.get("risk_gate"),
+                "regime": (scan_data.get("regime_settings") or {}).get("regime"),
             })
             
         except Exception as e:
@@ -131,6 +133,18 @@ def generate_daily_journal():
         
         results = analyze_signal_performance(scan_data)
         all_results.extend(results)
+        for result in results:
+            if result.get("signal_id") and result.get("current"):
+                try:
+                    record_signal_observation(
+                        result["signal_id"],
+                        result["current"],
+                        outcome=result["outcome"],
+                        outcome_return_pct=result["change_pct"],
+                        outcome_method=result["outcome_method"],
+                    )
+                except Exception as e:
+                    logger.warning("Failed to record signal observation: %s", e)
     
     if not all_results:
         return "No actionable signals to review today."
@@ -140,22 +154,24 @@ def generate_daily_journal():
     for r in all_results:
         outcomes[r['outcome']] += 1
     
-    winning = outcomes.get('winning', 0) + outcomes.get('target_hit', 0)
-    losing = outcomes.get('losing', 0) + outcomes.get('stopped_out', 0)
+    winning = outcomes.get('winning', 0)
+    losing = outcomes.get('losing', 0)
     total = winning + losing
     
-    win_rate = (winning / total * 100) if total > 0 else 0
+    win_rate = (winning / total * 100) if total > 0 else None
+    win_rate_text = f"{win_rate:.1f}%" if win_rate is not None else "N/A"
     
     # Build context for Qwen
     context = f"""# Daily Trade Journal
 {datetime.now().strftime("%Y-%m-%d")}
 
 ## Performance Summary
-- Total Signals: {len(all_results)}
-- Winning: {winning}
-- Losing: {losing}
-- Pending: {outcomes.get('pending', 0)}
-- Win Rate: {win_rate:.1f}%
+- Signals observed: {len(all_results)}
+- Closed trades with recorded fills: {total}
+- Realized wins: {winning}
+- Realized losses: {losing}
+- Open / unfilled observations: {outcomes.get('open', 0) + outcomes.get('price_above_target', 0) + outcomes.get('price_below_stop', 0)}
+- Realized win rate: {win_rate_text} (not inferred from price movement alone)
 
 ## Individual Signal Performance
 """
@@ -170,6 +186,10 @@ def generate_daily_journal():
         context += f"   Entry: ${r['entry']:.2f} → Current: ${r['current']:.2f}\n"
         context += f"   Change: {r['change_pct']:+.2f}%\n"
         context += f"   Outcome: {r['outcome'].replace('_', ' ').title()}\n"
+        context += f"   Method: {r['outcome_method']}\n"
+        if r.get("ml_probability") is not None:
+            context += f"   Calibrated 1-hour probability: {r['ml_probability']:.1%}\n"
+        context += f"   Regime: {r.get('regime') or 'Unknown'}\n"
     
     # Ask Qwen to analyze
     prompt = f"""{context}
@@ -177,10 +197,14 @@ def generate_daily_journal():
 YOUR TASK:
 Review today's trading signals and provide:
 
+Separate **Observed Evidence**, **Inference**, and **Recommendations**. Do not treat
+unfilled signal observations as realized trades or claim statistical relationships
+from this single-day sample.
+
 1. **What Worked**
    - Which signals had the best performance?
    - What patterns/setups succeeded?
-   - Which scoring factors correlated with wins?
+   - Only report scoring-factor correlations when there are enough resolved trades with recorded fills; otherwise state that evidence is insufficient.
 
 2. **What Failed**
    - Which signals underperformed?
@@ -200,7 +224,7 @@ Review today's trading signals and provide:
 Keep it under 400 words. Be honest about failures and specific about improvements."""
 
     try:
-        analysis = ask(prompt, max_tokens=2048)
+        analysis = ask(prompt, max_tokens=2048, task="journal")
         
         # Save journal entry
         journal_dir = os.path.join(os.path.dirname(__file__), "..", "data", "trade_journal")
@@ -356,7 +380,7 @@ Comprehensive weekly performance analysis:
 Keep it under 600 words. Be data-driven and actionable."""
 
     try:
-        analysis = ask(prompt, max_tokens=3072)
+        analysis = ask(prompt, max_tokens=3072, task="journal")
         
         # Save weekly review
         reviews_dir = os.path.join(os.path.dirname(__file__), "..", "data", "weekly_reviews")

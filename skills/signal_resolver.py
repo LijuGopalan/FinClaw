@@ -1,9 +1,4 @@
-"""
-FinClaw Signal Resolver — Auto-resolve WIN/LOSS/EXPIRED signals
-================================================================
-Checks all OPEN signals against current prices and resolves them
-based on target/stop-loss hit or time expiration.
-"""
+"""Record observations for open signals without implying an unverified fill."""
 
 import logging
 from datetime import datetime, timedelta
@@ -11,22 +6,33 @@ from datetime import datetime, timedelta
 logger = logging.getLogger("finclaw.resolver")
 
 
-def resolve_open_signals(get_stock_quote_fn, get_signals_fn, resolve_signal_fn,
-                          max_age_days=30):
+def resolve_open_signals(
+    get_stock_quote_fn,
+    get_signals_fn,
+    resolve_signal_fn,
+    record_observation_fn=None,
+    max_age_days=30,
+):
     """
-    Scan all OPEN signals and auto-resolve them:
-    - WIN: current price >= target_price
-    - LOSS: current price <= stop_loss
-    - EXPIRED: signal older than max_age_days without hitting target/stop
+    Record current marks and target/stop observations. Only the explicit
+    resolution endpoint may record a realized win/loss with fill details.
 
     Args:
         get_stock_quote_fn: callable to fetch current price
         get_signals_fn: callable to fetch signals from DB
-        resolve_signal_fn: callable to update signal outcome in DB
+        resolve_signal_fn: callable retained for backward compatibility
+        record_observation_fn: callable to persist a mark-to-market observation
         max_age_days: number of days before an unresolved signal expires
     """
     open_signals = get_signals_fn(include_resolved=False, limit=200)
-    resolved_count = {"win": 0, "loss": 0, "expired": 0, "still_open": 0}
+    counts = {
+        "target_observed": 0,
+        "stop_observed": 0,
+        "expired_unfilled": 0,
+        "awaiting_fill": 0,
+        "open_filled": 0,
+        "unavailable": 0,
+    }
 
     for sig in open_signals:
         if sig.get("outcome") and sig["outcome"] not in ("OPEN", None):
@@ -45,44 +51,51 @@ def resolve_open_signals(get_stock_quote_fn, get_signals_fn, resolve_signal_fn,
         # Fetch current price
         quote = get_stock_quote_fn(ticker)
         current_price = quote.get("price")
-        if not current_price:
+        if not current_price or not record_observation_fn:
             logger.warning("Could not fetch price for %s — skipping signal #%s", ticker, signal_id)
+            counts["unavailable"] += 1
             continue
 
-        # Check WIN
-        if target_price and current_price >= target_price:
-            return_pct = ((current_price - price_at_signal) / price_at_signal * 100) if price_at_signal else 0
-            resolve_signal_fn(signal_id, "WIN", current_price, round(return_pct, 2))
-            resolved_count["win"] += 1
-            logger.info("Signal #%s %s → WIN (target $%.2f hit, current $%.2f, return %.1f%%)",
-                        signal_id, ticker, target_price, current_price, return_pct)
-            continue
+        is_filled = sig.get("entry_filled") == 1 and sig.get("fill_price")
+        observed_return = None
+        if is_filled and sig.get("fill_price"):
+            observed_return = (current_price - sig["fill_price"]) / sig["fill_price"] * 100
 
-        # Check LOSS
-        if stop_loss and current_price <= stop_loss:
-            return_pct = ((current_price - price_at_signal) / price_at_signal * 100) if price_at_signal else 0
-            resolve_signal_fn(signal_id, "LOSS", current_price, round(return_pct, 2))
-            resolved_count["loss"] += 1
-            logger.info("Signal #%s %s → LOSS (stop $%.2f hit, current $%.2f, return %.1f%%)",
-                        signal_id, ticker, stop_loss, current_price, return_pct)
-            continue
+        outcome = "mark_to_market"
+        if not is_filled:
+            outcome = "awaiting_fill"
+            counts["awaiting_fill"] += 1
+        elif target_price and current_price >= target_price:
+            outcome = "target_level_observed"
+            counts["target_observed"] += 1
+        elif stop_loss and current_price <= stop_loss:
+            outcome = "stop_level_observed"
+            counts["stop_observed"] += 1
+        else:
+            counts["open_filled"] += 1
 
-        # Check EXPIRED
+        method = "quote_observation_not_execution"
         try:
-            signal_date = datetime.fromisoformat(created_at.replace("Z", "+00:00").replace("+00:00", ""))
+            signal_date = datetime.fromisoformat(created_at.replace("Z", "+00:00"))
+            if signal_date.tzinfo:
+                signal_date = signal_date.astimezone().replace(tzinfo=None)
             age = (datetime.utcnow() - signal_date).days
             if age > max_age_days:
-                return_pct = ((current_price - price_at_signal) / price_at_signal * 100) if price_at_signal else 0
-                outcome = "WIN" if return_pct > 0 else "LOSS"
-                resolve_signal_fn(signal_id, outcome, current_price, round(return_pct, 2))
-                resolved_count["expired"] += 1
-                logger.info("Signal #%s %s → %s (expired after %d days, return %.1f%%)",
-                            signal_id, ticker, outcome, age, return_pct)
-                continue
+                if not is_filled:
+                    outcome = "unfilled_expired"
+                    counts["expired_unfilled"] += 1
+                    counts["awaiting_fill"] -= 1
+                method = "quote_observation_expired"
         except (ValueError, TypeError):
-            pass
+            logger.warning("Invalid signal timestamp for #%s; recording current mark only", signal_id)
 
-        resolved_count["still_open"] += 1
+        record_observation_fn(
+            signal_id,
+            current_price,
+            outcome=outcome,
+            outcome_return_pct=round(observed_return, 2) if observed_return is not None else None,
+            outcome_method=method,
+        )
 
-    logger.info("Signal resolution complete: %s", resolved_count)
-    return resolved_count
+    logger.info("Signal observation pass complete: %s", counts)
+    return counts

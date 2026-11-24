@@ -145,7 +145,7 @@ Write a comprehensive institutional-grade research report with:
 
 Keep analysis sharp and data-driven. Cite specific numbers. Max 600 words."""
 
-        report = ask(prompt, max_tokens=3072)
+        report = ask(prompt, max_tokens=3072, task="research")
         
         return {
             "ticker": ticker,
@@ -310,7 +310,7 @@ Create a detailed trading plan for the upcoming week:
 Keep it actionable and specific. Max 500 words."""
 
     try:
-        plan = ask(prompt, max_tokens=2560)
+        plan = ask(prompt, max_tokens=2560, task="research")
         
         # Save to file
         plans_dir = os.path.join(os.path.dirname(__file__), "..", "data", "trading_plans")

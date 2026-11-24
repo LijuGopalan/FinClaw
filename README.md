@@ -171,6 +171,38 @@ To save on expensive LLM token costs and reduce latency, FinClaw uses a **two-st
 1. **Local ML Model (Pre-filter):** An internal XGBoost classifier (`finclaw_xgb.json`) instantly evaluates hundreds of technical indicators (RSI, MACD, Volume Spikes) locally on your machine, assigning a probability score to every setup.
 2. **Generative LLM (Analysis):** Only the highest-conviction opportunities (the "cream of the crop") are packaged and sent to the LLM (Gemini/Claude). The LLM is then used exclusively for what it does best: qualitative reasoning, analyzing fundamental context, interpreting market sentiment, and writing the final human-readable brief.
 
+### Qwen task routing, calibration, and signal accountability
+
+Local Ollama requests use separate model profiles instead of sending every job to
+one model. Configure `QWEN_FAST_MODEL`, `QWEN_REGIME_MODEL`, `QWEN_ANALYSIS_MODEL`,
+`QWEN_RISK_MODEL`, and `QWEN_RESEARCH_MODEL` in `.env`; pull each configured model
+with `ollama pull <model>`. Fast profiles default to Qwen 2.5 3B and research/risk
+profiles default to Qwen 2.5 7B. Regime, sentiment, red-team, and research outputs
+that drive application behavior use schema-constrained JSON.
+
+The XGBoost and MLX trainers now use timestamp-ordered train/calibration/test
+periods and save a Platt calibration artifact tied to the exact model checksum.
+Rebuild the dataset and retrain before relying on ML probabilities:
+
+```bash
+python ml_pipeline/build_dataset.py
+python ml_pipeline/train_model.py
+# Optional Apple Silicon model:
+python ml_pipeline/train_model_mlx.py
+```
+
+FinClaw omits uncalibrated model probabilities from scoring. Scanner alerts also
+pass a deterministic risk gate for quote freshness, intraday data source, trade
+levels, spread (when available), and minimum risk/reward. Regime settings adjust
+scan thresholds, universe size, automatic timeframe, stop distances, and the
+manual suggested-size calculation, within bounded limits.
+
+Saved opportunity scans now include evidence, inference, recommendation, risk gate,
+regime, and calibrated probability snapshots. These are signal observations, not
+proof of fills. The signal resolver records mark-to-market observations and no
+longer labels an unfilled signal a realized win/loss; record actual fill, fees,
+slippage, and final outcome through the signal API when known.
+
 ---
 
 ## ⚠️ Disclaimer

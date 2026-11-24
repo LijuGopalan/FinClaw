@@ -92,7 +92,7 @@ Analyze the overnight news and provide:
 Keep it under 400 words. Be sharp and actionable."""
 
     try:
-        analysis = ask(prompt, max_tokens=2048)
+        analysis = ask(prompt, max_tokens=2048, task="brief")
         return analysis
     except Exception as e:
         logger.error(f"Qwen analysis failed: {e}")
@@ -160,7 +160,7 @@ Analyze these pre-market movers and provide:
 Keep it under 350 words."""
 
     try:
-        analysis = ask(prompt, max_tokens=2048)
+        analysis = ask(prompt, max_tokens=2048, task="research")
         return analysis
     except Exception as e:
         logger.error(f"Qwen analysis failed: {e}")
@@ -233,7 +233,7 @@ Quick after-hours analysis:
 Keep it under 250 words. Be direct."""
 
     try:
-        analysis = ask(prompt, max_tokens=1536)
+        analysis = ask(prompt, max_tokens=1536, task="brief")
         return analysis
     except Exception as e:
         logger.error(f"After-hours analysis failed: {e}")

@@ -70,6 +70,8 @@ ET = ZoneInfo("America/New_York")
 # ── ML Model Integration (MLX-first, XGBoost fallback) ──────────────────────
 _ML_MODEL  = None
 _ML_LOADED = False
+_ML_MODEL_KIND = None
+_ML_CALIBRATION = None
 
 class _MLXModelAdapter:
     """
@@ -115,70 +117,93 @@ class _MLXModelAdapter:
 
 def get_ml_model():
     """
-    Load the best available FinClaw ML model.
-
-    Priority:
-      1. MLX MLP  (models/finclaw_mlx.npz)   — GPU/Neural Engine on Apple Silicon
-      2. XGBoost  (models/finclaw_xgb.json)  — CPU fallback if MLX model absent
-
-    Both return an object with a predict_proba(features_df) method so the
-    rest of the scoring code is completely unaffected.
+    Load only a model with a matching, checksum-verified calibration artifact.
     """
-    global _ML_MODEL, _ML_LOADED
+    global _ML_MODEL, _ML_LOADED, _ML_MODEL_KIND, _ML_CALIBRATION
     if _ML_LOADED:
         return _ML_MODEL
     _ML_LOADED = True
 
-    # ── 1. Try MLX model (GPU / Neural Engine) ────────────────────────────────
-    mlx_weights = os.path.join(BASE_DIR, "models", "finclaw_mlx.npz")
-    mlx_config  = os.path.join(BASE_DIR, "models", "finclaw_mlx_config.json")
-    if os.path.exists(mlx_weights) and os.path.exists(mlx_config):
+    models_dir = os.path.join(BASE_DIR, "models")
+    expected_features = ["rsi", "macd_hist", "atr_pct", "rvol", "vwap_dist"]
+    try:
+        from ml_pipeline.calibration import sha256_file
+    except ImportError:
+        from calibration import sha256_file
+
+    for model_kind in ("mlx", "xgboost"):
+        model_path = os.path.join(
+            models_dir,
+            "finclaw_mlx.npz" if model_kind == "mlx" else "finclaw_xgb.json",
+        )
+        calibration_path = os.path.join(
+            models_dir,
+            f"finclaw_{model_kind}_calibration.json",
+        )
         try:
             import json
-            import numpy as np
-            import mlx.core as mx
-            import mlx.nn as nn
-            import sys
+            with open(calibration_path) as f:
+                calibration = json.load(f)
+            if (
+                not os.path.exists(model_path)
+                or calibration.get("model_kind") != model_kind
+                or calibration.get("method") != "platt"
+                or calibration.get("model_sha256") != sha256_file(model_path)
+                or calibration.get("feature_names") != expected_features
+                or calibration.get("sample_count", 0) < 50
+            ):
+                print(f"Skipping {model_kind}: matching calibration artifact unavailable.")
+                continue
 
-            # Dynamically import FinClawMLP from the training script
-            ml_pipeline_dir = os.path.join(BASE_DIR, "ml_pipeline")
-            if ml_pipeline_dir not in sys.path:
-                sys.path.insert(0, ml_pipeline_dir)
-            from train_model_mlx import FinClawMLP
+            if model_kind == "mlx":
+                import numpy as np
+                import sys
+                import mlx.core as mx
 
-            with open(mlx_config) as f:
-                cfg = json.load(f)
+                config_path = os.path.join(models_dir, "finclaw_mlx_config.json")
+                with open(config_path) as f:
+                    cfg = json.load(f)
+                ml_pipeline_dir = os.path.join(BASE_DIR, "ml_pipeline")
+                if ml_pipeline_dir not in sys.path:
+                    sys.path.insert(0, ml_pipeline_dir)
+                from train_model_mlx import FinClawMLP
 
-            mlx_model = FinClawMLP(
-                input_dim   = cfg["input_dim"],
-                hidden_dims = cfg["hidden_dims"],
-                dropout_p   = cfg["dropout_p"],
-            )
-            mlx_model.load_weights(mlx_weights)
-            mlx_model.eval()  # disable dropout for inference
+                model = FinClawMLP(
+                    input_dim=cfg["input_dim"],
+                    hidden_dims=cfg["hidden_dims"],
+                    dropout_p=cfg["dropout_p"],
+                )
+                model.load_weights(model_path)
+                model.eval()
+                _ML_MODEL = _MLXModelAdapter(
+                    model,
+                    np.array(cfg["norm_mean"], dtype=np.float32),
+                    np.array(cfg["norm_std"], dtype=np.float32),
+                )
+            else:
+                import xgboost as xgb
+                _ML_MODEL = xgb.XGBClassifier()
+                _ML_MODEL.load_model(model_path)
 
-            norm_mean = np.array(cfg["norm_mean"], dtype=np.float32)
-            norm_std  = np.array(cfg["norm_std"],  dtype=np.float32)
-
-            _ML_MODEL = _MLXModelAdapter(mlx_model, norm_mean, norm_std)
-            print("🧠 Loaded FinClaw MLX model (GPU/Neural Engine).")
-            return _ML_MODEL
+            _ML_MODEL_KIND = model_kind
+            _ML_CALIBRATION = calibration
+            print(f"🧠 Loaded calibrated FinClaw {model_kind} model.")
+            break
         except Exception as e:
-            print(f"Warning: Failed to load MLX model ({e}), trying XGBoost fallback...")
-
-    # ── 2. Fallback: XGBoost CPU model ────────────────────────────────────────
-    xgb_path = os.path.join(BASE_DIR, "models", "finclaw_xgb.json")
-    if os.path.exists(xgb_path):
-        try:
-            import xgboost as xgb
-            clf = xgb.XGBClassifier()
-            clf.load_model(xgb_path)
-            _ML_MODEL = clf
-            print("🧠 Loaded FinClaw XGBoost model (CPU fallback).")
-        except Exception as e:
-            print(f"Warning: Failed to load XGBoost fallback model: {e}")
+            print(f"Warning: Failed to load calibrated {model_kind} model ({e}).")
 
     return _ML_MODEL
+
+
+def _calibrate_ml_probability(probability):
+    """Return a calibrated probability or None when no matching artifact exists."""
+    if not _ML_CALIBRATION:
+        return None
+    try:
+        from ml_pipeline.calibration import apply_platt_scaling
+    except ImportError:
+        from calibration import apply_platt_scaling
+    return apply_platt_scaling(probability, _ML_CALIBRATION)
 
 
 
@@ -567,31 +592,32 @@ def _score_macro_context():
     return score, flags, {"economic": econ, "sectors": sectors}
 
 
-def _price_levels(price, atr, horizon):
+def _price_levels(price, atr, horizon, stop_loss_multiplier=1.0):
     if not price:
         return {"entry_low": None, "entry_high": None, "target_price": None, "stop_loss": None}
 
     atr = atr or price * 0.02
+    stop_loss_multiplier = max(1.0, min(_safe_float(stop_loss_multiplier, 1.0), 2.0))
     if horizon == "scalp":
         entry_low = price - atr * 0.15
         entry_high = price + atr * 0.10
         target = price + atr * 0.55
-        stop = price - atr * 0.35
+        stop = price - atr * 0.35 * stop_loss_multiplier
     elif horizon == "day":
         entry_low = price - atr * 0.25
         entry_high = price + atr * 0.15
         target = price + atr * 0.90
-        stop = price - atr * 0.55
+        stop = price - atr * 0.55 * stop_loss_multiplier
     elif horizon == "long":
         entry_low = price * 0.96
         entry_high = price * 1.01
         target = price * 1.18
-        stop = price * 0.90
+        stop = price * (1 - 0.10 * stop_loss_multiplier)
     else:
         entry_low = price * 0.98
         entry_high = price * 1.01
         target = price * 1.10
-        stop = price * 0.94
+        stop = price * (1 - 0.06 * stop_loss_multiplier)
 
     return {
         "entry_low": _round(entry_low),
@@ -611,7 +637,72 @@ def _risk_reward(price, target, stop):
     return round(reward / risk, 2)
 
 
-def score_ticker_opportunity(ticker, session="auto", horizon="auto", include_options=True):
+def evaluate_risk_gate(quote, price, entry_low, entry_high, target, stop, risk_reward, horizon):
+    """Apply non-LLM data-quality and trade-geometry vetoes to long setups."""
+    vetoes = []
+    quote_age_seconds = None
+    price = _safe_float(price)
+    entry_low = _safe_float(entry_low)
+    entry_high = _safe_float(entry_high)
+    target = _safe_float(target)
+    stop = _safe_float(stop)
+    risk_reward = _safe_float(risk_reward)
+
+    if price is None or price <= 0:
+        vetoes.append("Missing or invalid market price")
+    if not quote.get("source"):
+        vetoes.append("Market data source is missing")
+
+    timestamp = quote.get("timestamp")
+    if not timestamp:
+        vetoes.append("Market quote timestamp is missing")
+    else:
+        try:
+            quoted_at = datetime.fromisoformat(str(timestamp).replace("Z", "+00:00"))
+            if quoted_at.tzinfo is None:
+                quoted_at = quoted_at.replace(tzinfo=ZoneInfo("UTC"))
+            quote_age_seconds = (datetime.now(ZoneInfo("UTC")) - quoted_at).total_seconds()
+            if quote_age_seconds < -60 or quote_age_seconds > 300:
+                vetoes.append("Market quote is stale or has an invalid timestamp")
+        except (TypeError, ValueError):
+            vetoes.append("Market quote timestamp is invalid")
+
+    source = str(quote.get("source", "")).lower()
+    if horizon in ("scalp", "day") and "yfinance" in source:
+        vetoes.append("Unofficial yfinance data is not eligible for intraday setups")
+    if price is not None and stop is not None and stop >= price:
+        vetoes.append("Stop loss must be below the current price")
+    if price is not None and target is not None and target <= price:
+        vetoes.append("Target must be above the current price")
+    if any(value is None for value in (entry_low, entry_high, target, stop)):
+        vetoes.append("Entry, target, or stop levels are missing")
+    elif entry_low <= 0 or entry_high < entry_low:
+        vetoes.append("Entry range is invalid")
+    if risk_reward is None or risk_reward < 1.2:
+        vetoes.append("Risk/reward is below the 1.2:1 minimum")
+
+    bid = _safe_float(quote.get("bid"))
+    ask = _safe_float(quote.get("ask"))
+    if bid and ask and ask >= bid and price:
+        spread_pct = (ask - bid) / price * 100
+        if horizon in ("scalp", "day") and spread_pct > 1.0:
+            vetoes.append("Quoted spread exceeds the 1% intraday limit")
+
+    return {
+        "passed": not vetoes,
+        "vetoes": vetoes,
+        "quote_age_seconds": round(quote_age_seconds, 1) if quote_age_seconds is not None else None,
+        "policy": "deterministic_v1",
+    }
+
+
+def score_ticker_opportunity(
+    ticker,
+    session="auto",
+    horizon="auto",
+    include_options=True,
+    stop_loss_multiplier=1.0,
+):
     """
     Score one ticker and return a structured opportunity candidate.
     The score is intentionally transparent: reasons and risk flags show
@@ -684,20 +775,25 @@ def score_ticker_opportunity(ticker, session="auto", horizon="auto", include_opt
                 'vwap_dist': ml_vwap_dist
             }])
             
-            # Predict probability of 1% upward move in 1 hour
-            prob = float(model.predict_proba(features)[0][1])
-            ml_prob = prob
+            raw_prob = float(model.predict_proba(features)[0][1])
+            prob = _calibrate_ml_probability(raw_prob)
+            if prob is None:
+                risk_flags.append("ML probability unavailable: retrain with a matching calibration artifact")
+            else:
+                ml_prob = prob
             
-            if prob > 0.65:
+            if prob is not None and prob > 0.65:
                 bonus = int(prob * 40)
                 score += bonus
-                reasons.append(f"🤖 ML High Probability Buy ({prob:.1%} chance of breakout)")
-                catalyst_flags.append("🤖 AI Predicts Breakout")
-            elif prob < 0.20:
+                reasons.append(f"🤖 Calibrated ML probability: {prob:.1%} for a 1% upward move in 1 hour")
+                catalyst_flags.append("🤖 Calibrated ML Breakout Probability")
+            elif prob is not None and prob < 0.20:
                 score -= 15
-                risk_flags.append(f"🤖 ML flags high failure probability ({prob:.1%})")
+                risk_flags.append(f"🤖 Calibrated ML probability is low ({prob:.1%})")
     except Exception as e:
-        pass
+        logging.getLogger("finclaw.opportunity_engine").warning(
+            "[%s] ML probability unavailable: %s", ticker, e
+        )
 
     if abs(change_pct) >= 2:
         score += min(12, abs(change_pct) * 2)
@@ -918,13 +1014,26 @@ def score_ticker_opportunity(ticker, session="auto", horizon="auto", include_opt
     except Exception as e:
         pass
 
-    levels = _price_levels(price, atr, horizon)
+    levels = _price_levels(price, atr, horizon, stop_loss_multiplier)
     if vcp_buy_point:
         levels["entry_high"] = vcp_buy_point
         
     rr = _risk_reward(price, levels.get("target_price"), levels.get("stop_loss"))
     if rr is not None and rr < 1.2:
         risk_flags.append(f"Thin risk/reward {rr}:1")
+    risk_gate = evaluate_risk_gate(
+        quote,
+        price,
+        levels.get("entry_low"),
+        levels.get("entry_high"),
+        levels.get("target_price"),
+        levels.get("stop_loss"),
+        rr,
+        horizon,
+    )
+    if "BUY" in action and not risk_gate["passed"]:
+        action = "BLOCKED"
+        risk_flags.extend(risk_gate["vetoes"])
 
     thesis_bits = []
     if reasons:
@@ -935,6 +1044,21 @@ def score_ticker_opportunity(ticker, session="auto", horizon="auto", include_opt
         thesis_bits.append("Smart money: " + ", ".join(smart_money_flags[:3]))
     if not thesis_bits:
         thesis_bits.append("No high-conviction catalyst detected; keep on watchlist.")
+    thesis = " ".join(thesis_bits)
+    evidence = {
+        "price": _round(price),
+        "quote_source": quote.get("source"),
+        "quote_timestamp": quote.get("timestamp"),
+        "technical_indicators": {
+            "rsi_14": _round(rsi),
+            "macd_histogram": _round(macd_hist, 4),
+            "atr_14": _round(atr),
+            "vwap": _round(vwap),
+            "support": _round(support),
+            "resistance": _round(resistance),
+        },
+        "reasons": list(dict.fromkeys(reasons))[:8],
+    }
 
     return {
         "ticker": ticker,
@@ -944,6 +1068,7 @@ def score_ticker_opportunity(ticker, session="auto", horizon="auto", include_opt
         "horizon_label": HORIZON_LABELS.get(horizon, horizon.title()),
         "score": score,
         "confidence": score,
+        "ml_probability": _round(ml_prob, 4),
         "price": _round(price),
         "change_pct": _round(change_pct),
         "volume_ratio": _round(volume_ratio),
@@ -957,7 +1082,11 @@ def score_ticker_opportunity(ticker, session="auto", horizon="auto", include_opt
         "target_price": levels.get("target_price"),
         "stop_loss": levels.get("stop_loss"),
         "risk_reward": rr,
-        "thesis": " ".join(thesis_bits),
+        "risk_gate": risk_gate,
+        "thesis": thesis,
+        "evidence": evidence,
+        "inference": thesis,
+        "recommendation": action,
         "reasons": list(dict.fromkeys(reasons))[:8],
         "risk_flags": list(dict.fromkeys(risk_flags))[:8],
         "catalyst_flags": list(dict.fromkeys(catalyst_flags))[:8],
@@ -986,17 +1115,35 @@ def get_opportunities(
     tickers=None,
     limit=12,
     include_options=True,
-    min_score=0,
-    universe_limit=24,
+    min_score=None,
+    universe_limit=None,
 ):
     """
     Rank opportunities across the configured OpenClaw watchlists.
     """
+    try:
+        from skills.volatility_regime import get_current_regime_settings
+    except ImportError:
+        from .volatility_regime import get_current_regime_settings
+    regime_settings = get_current_regime_settings()
+
     session = normalize_session(session)
+    if not horizon or str(horizon).strip().lower() == "auto":
+        horizon = regime_settings.get("preferred_timeframe", "swing")
     horizon = normalize_horizon(horizon)
     limit = max(1, min(_safe_int(limit, 12), 50))
-    universe_limit = max(limit, min(_safe_int(universe_limit, 24), 80))
-    min_score = max(0, min(_safe_int(min_score, 0), 100))
+    regime_universe_limit = _safe_int(regime_settings.get("universe_limit"), 40)
+    requested_universe_limit = (
+        regime_universe_limit
+        if universe_limit is None
+        else min(regime_universe_limit, _safe_int(universe_limit, regime_universe_limit))
+    )
+    universe_limit = max(1, min(requested_universe_limit, 80))
+    limit = min(limit, universe_limit)
+    regime_min_score = _safe_int(regime_settings.get("min_opportunity_score"), 58)
+    requested_min_score = max(0, min(_safe_int(min_score, 0), 100))
+    min_score = max(regime_min_score, requested_min_score)
+    stop_loss_multiplier = _safe_float(regime_settings.get("stop_loss_multiplier"), 1.0)
     
     if tickers:
         universe = _dedupe_tickers(tickers, limit=universe_limit)
@@ -1018,6 +1165,7 @@ def get_opportunities(
                 session=session,
                 horizon=horizon,
                 include_options=include_options,
+                stop_loss_multiplier=stop_loss_multiplier,
             )
         except Exception as e:
             return {"error": str(e), "ticker": ticker}
@@ -1045,6 +1193,7 @@ def get_opportunities(
         "session": session,
         "horizon": horizon,
         "horizon_label": HORIZON_LABELS.get(horizon, horizon.title()),
+        "regime_settings": regime_settings,
         "generated_at": datetime.utcnow().isoformat(),
         "universe_count": len(universe),
         "returned_count": len(top),
